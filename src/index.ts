@@ -75,6 +75,14 @@ import {
   type SkillStoreReader,
 } from './skills.js'
 import { dateStamp, normalizeText, toPosix } from './text.js'
+import {
+  CONFIG_SECTION,
+  DEFAULT_LAYERS,
+  WORKSPACE_CONFIG_REL,
+  isMemoryWritable,
+  readWorkspaceConfig,
+  type ParsedWorkspaceConfig,
+} from './workspace-config.js'
 
 export const name = 'workspace-conventions'
 
@@ -203,6 +211,8 @@ export function apply(ctx: Context, config: Config): void {
 
   const cache = new Map<string, WorkspaceMemoryState>()
   const rulesCache = new Map<string, WorkspaceRulesState>()
+  /** Project-level switches per workspace, from `.dsh/workspace.yml`. */
+  const configCache = new Map<string, { readonly config: ParsedWorkspaceConfig, readonly stamp: string | undefined }>()
   /**
    * Conditional books already triggered, keyed by workspace.
    *
@@ -244,11 +254,11 @@ export function apply(ctx: Context, config: Config): void {
   const policyFor = (session: unknown): SandboxExecutionPolicy | undefined =>
     ctx.sandboxPolicy.resolve(session === undefined ? {} : { session: session as never })
 
-  const statAt = async (target: string): Promise<{ readonly type?: string, readonly size?: number } | undefined> => {
+  const statAt = async (target: string): Promise<{ readonly type?: string, readonly size?: number, readonly mtimeMs?: number } | undefined> => {
     try {
       const t = await fs.resolve(target)
       const info = await fs.stat(t)
-      return info as { readonly type?: string, readonly size?: number } | undefined
+      return info as { readonly type?: string, readonly size?: number, readonly mtimeMs?: number } | undefined
     } catch { return undefined }
   }
 
@@ -357,6 +367,7 @@ export function apply(ctx: Context, config: Config): void {
     if (workspace === undefined) return
     void loadState(workspace).catch(() => undefined)
     void loadRules(workspace).catch(() => undefined)
+    void loadConfig(workspace).catch(() => undefined)
   }
 
   const stateFor = async (workspace: string): Promise<WorkspaceMemoryState> =>
@@ -364,6 +375,135 @@ export function apply(ctx: Context, config: Config): void {
 
   const rulesFor = async (workspace: string): Promise<WorkspaceRulesState> =>
     rulesCache.get(workspace) ?? await loadRules(workspace)
+
+  /**
+   * Read `.dsh/workspace.yml` for one workspace.
+   *
+   * This is the only source of the three layer switches. A workspace whose file
+   * is missing — or which simply has no section for this plugin — resolves to
+   * every layer on, so nothing changes for a project that never opts in.
+   *
+   * The cached entry records the file's size and modification time, because a
+   * cache that is never revalidated would freeze the answer from the moment the
+   * row loaded: a config file added a second later would never take effect.
+   */
+  const loadConfig = async (workspace: string): Promise<ParsedWorkspaceConfig> => {
+    // Stamp the file *before* reading it. The synchronous prompt providers call
+    // this in the background, so a read that started before an edit can finish
+    // after it; taking the stamp last would record the new file against the old
+    // contents and make that stale snapshot look current. Stamped first, the
+    // entry disagrees with the next revalidation and is simply reloaded.
+    const stamp = await configStamp(workspace)
+    const config = await readWorkspaceConfig({
+      stat: async (path) => (await statAt(path))?.type === 'file',
+      read: readAt,
+    }, workspace)
+    configCache.set(workspace, { config, stamp })
+    if (config.issues.length > 0) {
+      ctx.logger.warn(`${WORKSPACE_CONFIG_REL} in ${toPosix(workspace)}: ${config.issues.map((issue) => issue.message).join('; ')}`)
+    }
+    return config
+  }
+
+  /**
+   * A value that changes exactly when the file's contents could have changed.
+   *
+   * This measures the file on disk; it must not consult the parsed config, whose
+   * `exists` is exactly the stale answer being revalidated. "Absent" is a stamp of
+   * its own, so a file that appears later cannot look identical to one that was
+   * never there — which is precisely when a reload is needed.
+   */
+  const configStamp = async (workspace: string): Promise<string> => {
+    const info = await statAt(join(workspace, WORKSPACE_CONFIG_REL))
+    return info === undefined || info.type !== 'file' ? 'absent' : `${String(info.size)}:${String(info.mtimeMs)}`
+  }
+
+  /**
+   * The switches in force for one workspace, revalidated before use.
+   *
+   * Tools await this, so a workspace's switches are in hand before the tool
+   * decides anything. The prompt providers are synchronous and cannot wait, so
+   * they read the cache through {@link cachedConfig} and treat "not probed yet"
+   * as "use the defaults" — the same warm-up turn the other caches already have.
+   */
+  const configFor = async (workspace: string): Promise<ParsedWorkspaceConfig> => {
+    const cached = configCache.get(workspace)
+    if (cached === undefined) return await loadConfig(workspace)
+
+    if (await configStamp(workspace) !== cached.stamp) return await loadConfig(workspace)
+    return cached.config
+  }
+
+  const cachedConfig = (workspace: string | undefined): ParsedWorkspaceConfig | undefined =>
+    workspace === undefined ? undefined : configCache.get(workspace)?.config
+
+  /** The verdict on one layer, from the cache only. */
+  const layerOn = (workspace: string | undefined, layer: 'rules' | 'skills'): boolean => {
+    const cached = cachedConfig(workspace)
+    return cached === undefined ? DEFAULT_LAYERS[layer] : cached.layers[layer]
+  }
+
+  /**
+   * Refuse a tool call when its layer is off for this workspace.
+   *
+   * Tools are registered once, process-wide, and Cordis cannot unregister them
+   * per workspace; the nearest honest equivalent is a refusal that names the file
+   * and the switch, so the model learns why instead of reading an empty result as
+   * "this workspace has nothing". A configuration file that failed to parse is
+   * reported here in full, because in that state every layer is refused and the
+   * prompt is empty — this message is then the only place the reason appears.
+   */
+  const refuseLayer = async (workspace: string, layer: 'memory' | 'rules' | 'skills'): Promise<JsonValue | undefined> => {
+    const config = await configFor(workspace)
+    const off = layer === 'memory' ? config.layers.memory === 'disabled' : config.layers[layer] === false
+    if (!off) return undefined
+
+    const issues = config.issues.map((issue) => (issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message))
+    return {
+      ok: false,
+      error: issues.length > 0
+        ? `${WORKSPACE_CONFIG_REL} 有配置错误，三层已全部停用：${issues.join('; ')}`
+        : `${layer} 层在本工作区已禁用（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.${layer}）`,
+      configFile: config.rel,
+      configIssues: issues,
+    } as unknown as JsonValue
+  }
+
+  /** Refuse a write when the memory layer is read-only or off. */
+  const refuseWrite = async (workspace: string): Promise<JsonValue | undefined> => {
+    const config = await configFor(workspace)
+    if (config.layers.memory === 'enabled') return undefined
+
+    if (config.layers.memory === 'read-only') {
+      return {
+        ok: false,
+        written: false,
+        error: `memory 层在本工作区为只读（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.memory: read-only），拒绝写入`,
+        configFile: config.rel,
+      } as unknown as JsonValue
+    }
+
+    return refuseLayer(workspace, 'memory')
+  }
+
+  /** A short, quotable summary of the project-level switches, for the status tools. */
+  const configSummary = (workspace: string): JsonValue => {
+    const config = cachedConfig(workspace)
+    if (config === undefined) {
+      return { status: 'pending', file: WORKSPACE_CONFIG_REL, note: '尚未探测完成；本轮按默认（三层启用）运行' } as unknown as JsonValue
+    }
+
+    return {
+      status: config.issues.length === 0 ? 'ok' : 'error',
+      file: config.rel,
+      exists: config.exists,
+      layers: config.layers,
+      ...config.issues.length > 0 ? { issues: config.issues.map((issue) => (issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message)) } : {},
+      note: config.exists
+        ? '项目级开关来自该文件；未出现的字段取默认（启用）'
+        : '无项目级配置文件，三层全部启用',
+    } as unknown as JsonValue
+  }
 
   /** Render the memory prompt section from a cached snapshot. Total: it never throws. */
   const renderPrompt = (workspace: string, state: WorkspaceMemoryState): string => {
@@ -431,6 +571,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'memory')
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       return {
         ok: true,
@@ -447,6 +589,8 @@ export function apply(ctx: Context, config: Config): void {
         ledgerDir: toPosix(join(state.dir, state.hostDir)),
         ledgers: state.ledgers.map((f) => f.rel),
         candidates: state.candidates,
+        writable: isMemoryWritable(cachedConfig(workspace)?.layers.memory ?? DEFAULT_LAYERS.memory),
+        config: configSummary(workspace),
         globalScope: '未实现（接口已预留）',
       } as unknown as JsonValue
     },
@@ -466,6 +610,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'memory')
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       const ledgers = state.ledgers.map((f) => f.rel)
 
@@ -514,6 +660,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'memory')
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       const query = normalizeText(args.query)
       if (query.length === 0) return { ok: false, error: 'query 不能为空' } as unknown as JsonValue
@@ -534,8 +682,7 @@ export function apply(ctx: Context, config: Config): void {
   }))
 
   ctx.tools.register(defineTool({
-    name: 'memory_write',
-    description:
+    name: 'memory_write',    description:
       '经准入审查后，向日期流水追加一条跨会话仍有价值的记忆：决策及其理由、稳定偏好、约定、可复现的坑、环境限制、硬约束。'
       + '绝不记录密钥、一次性改动或排错流水账；读起来像流水账的条目会被拒绝，除非 force=true。'
       + '写入位置遵循记忆目录的实际布局：平铺时写 memory/YYYY-MM-DD.md，按计算机名分目录时写 memory/<本机计算机名>/YYYY-MM-DD.md。',
@@ -551,6 +698,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseWrite(workspace)
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       const verdict = evaluateEntry(args.content, args.kind)
 
@@ -613,6 +762,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseWrite(workspace)
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       const entry = normalizeText(args.entry)
       if (entry.length === 0) return { ok: false, changed: false, error: '提升内容不能为空' } as unknown as JsonValue
@@ -642,6 +793,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'memory')
+      if (refused !== undefined) return refused
       const state = await stateFor(workspace)
       return {
         ok: true,
@@ -687,6 +840,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'rules')
+      if (refused !== undefined) return refused
       const state = await rulesFor(workspace)
       const active = triggered.get(workspace) ?? EMPTY_RULES
       return {
@@ -696,6 +851,7 @@ export function apply(ctx: Context, config: Config): void {
         absoluteDir: state.dir,
         exists: state.exists,
         budgets: { rulesPromptBytes, ruleFileBytes },
+        config: configSummary(workspace),
         total: state.rules.length,
         books: state.rules.map((rule) => ({
           file: rule.file,
@@ -721,6 +877,8 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await refuseLayer(workspace, 'rules')
+      if (refused !== undefined) return refused
       const state = await rulesFor(workspace)
       const query = normalizeText(args.file).replace(/^\.\//, '')
       const byRel = state.rules.find((rule) => rule.rel === query || rule.rel === `${state.dirRel}/${query}`)
@@ -760,6 +918,8 @@ export function apply(ctx: Context, config: Config): void {
         if (workspace === undefined) return ''
         const session = sessionOf(agent)
         if (session !== undefined) sessions.set(workspace, session)
+        // A workspace switch decides whether this layer is injected at all.
+        if (!layerOn(workspace, 'rules')) return ''
         const state = rulesCache.get(workspace)
         if (state === undefined) {
           refresh(workspace)
@@ -786,6 +946,12 @@ export function apply(ctx: Context, config: Config): void {
         if (workspace === undefined) return ''
         const session = sessionOf(agent)
         if (session !== undefined) sessions.set(workspace, session)
+        // `disabled` drops the section. `read-only` drops it too: what this
+        // section carries is the index text itself, and a read-only workspace
+        // still reaches that content through the read tools, so injecting it
+        // every turn would only duplicate what the tools can fetch on demand.
+        const cached = cachedConfig(workspace)
+        if (cached !== undefined && !isMemoryWritable(cached.layers.memory)) return ''
         const state = cache.get(workspace)
         if (state === undefined) {
           refresh(workspace)
@@ -806,7 +972,7 @@ export function apply(ctx: Context, config: Config): void {
     invalidateSkills = control.invalidate
     return createWorkbuddySkillProvider(skillReader, 'workspace-workbuddy-skills', (message) => {
       ctx.logger.warn(message)
-    })
+    }, (workspace) => layerOn(workspace, 'skills'))
   }), 'workspace-conventions.skills')
 
   /**
@@ -835,6 +1001,9 @@ export function apply(ctx: Context, config: Config): void {
     if (agent === undefined || exec.signal.aborted) return undefined
     const workspace = workspaceOf(agent)
     if (workspace === undefined) return undefined
+    // With the layer off no book may be injected, so recording a trigger would
+    // only accumulate state that nothing reads.
+    if (!layerOn(workspace, 'rules')) return undefined
     const rel = touchedPath(exec, workspace)
     if (rel === undefined) return undefined
 

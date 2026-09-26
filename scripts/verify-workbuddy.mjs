@@ -22,7 +22,7 @@
 // Exit status is non-zero when a triggered book is neither injected nor reachable
 // by name, or when the section exceeds its budget.
 import { existsSync } from 'node:fs'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { readFile, readdir, stat as statFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 // The row lives in the built output, and `lib/` is not committed, so a fresh
@@ -35,6 +35,7 @@ if (!existsSync(new URL('../lib/index.js', import.meta.url))) {
 
 const { expandBraces, matchGlob } = await import('../lib/glob.js')
 const { defaultProfileDir, readPatchFile, resolveRow } = await import('../lib/patch.js')
+const { DEFAULT_LAYERS, readWorkspaceConfig } = await import('../lib/workspace-config.js')
 
 const ROW_ID = 'workspace-conventions'
 const BUNDLE_PATCH = 'cordis.patch.yml'
@@ -87,7 +88,7 @@ const ctx = {
     resolve: async (path) => ({ path, displayPath: path }),
     stat: async (target) => {
       try {
-        const info = await stat(target.path)
+        const info = await statFile(target.path)
         return { type: info.isDirectory() ? 'directory' : info.isFile() ? 'file' : 'other', size: info.size }
       } catch { return undefined }
     },
@@ -115,9 +116,41 @@ const settle = async (predicate) => {
 
 await settle(() => render('workspace-rules').includes('常驻册'))
 
+// The project file can switch a layer off, in which case this probe would
+// otherwise report contributions the session never sees.
+const projectConfig = await readWorkspaceConfig({
+  // The reader's contract is "answer false when the file is not there", so an
+  // absent file must not surface as a rejected stat.
+  stat: async (path) => { try { return (await statFile(path)).isFile() } catch { return false } },
+  read: async (path) => { try { return await readFile(path, 'utf8') } catch { return undefined } },
+}, workspace)
+const layers = projectConfig.layers
+
+console.log('=== project switches ===')
+console.log('file     :', projectConfig.rel, projectConfig.exists ? '(exists)' : '(absent)')
+console.log('layers   :', layers.memory === DEFAULT_LAYERS.memory && layers.rules === DEFAULT_LAYERS.rules && layers.skills === DEFAULT_LAYERS.skills
+  ? 'all on (memory enabled, rules on, skills on)'
+  : `memory=${layers.memory} rules=${String(layers.rules)} skills=${String(layers.skills)}`)
+for (const issue of projectConfig.issues) console.log('  issue  :', issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message)
+if (projectConfig.issues.length > 0) failures.push(`${projectConfig.rel} has configuration errors, so every layer is stopped`)
+
 const status = await tools.find((t) => t.name === 'rule_status').execute({})
 console.log('=== memory ===')
-console.log(render('workspace-memory').split('\n')[0])
+console.log(render('workspace-memory').split('\n')[0] || '(section not injected)')
+
+// A refused status means the layer is off, so there is no rule report to make.
+// Reporting the refusal and stopping is the honest output; reading fields off a
+// refusal would crash the probe instead of explaining the workspace.
+if (status.ok !== true) {
+  console.log('=== rules ===')
+  console.log('refused  :', status.error)
+  console.log('verdict  : FAIL')
+  console.error('')
+  for (const failure of failures) console.error(`  - ${failure}`)
+  console.error(`  - ${String(status.error)}`)
+  process.exit(1)
+}
+
 console.log('=== rules ===')
 console.log('dir      :', status.rulesDir, status.exists ? '(exists)' : '(missing)')
 console.log('books    :', status.total)

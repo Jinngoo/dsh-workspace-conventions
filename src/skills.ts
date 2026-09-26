@@ -117,12 +117,14 @@ export interface SkillStoreReader {
  * @param reader - the filesystem reads to use.
  * @param providerName - the unique provider name to register under.
  * @param log - sink for bundles that were found but rejected.
+ * @param enabled - whether the layer is on for one workspace; omitted means always on.
  * @returns the provider to hand to `ctx.skills.registerProvider()`.
  */
 export function createWorkbuddySkillProvider(
   reader: SkillStoreReader,
   providerName: string,
   log: (message: string) => void,
+  enabled: (workspace: string) => boolean = () => true,
 ): SkillProvider {
   const toCandidate = (skill: WorkbuddySkill, path: string, directory: string): SkillCandidate => ({
     name: skill.name,
@@ -153,6 +155,9 @@ export function createWorkbuddySkillProvider(
     async list(options) {
       const workspace = options.cwd
       if (workspace === undefined || workspace.length === 0) return []
+      // A workspace whose project file turns this layer off publishes nothing, so
+      // the directory is never even scanned.
+      if (!enabled(workspace)) return []
       options.signal?.throwIfAborted()
       const root = join(workspace, WORKBUDDY_DIR, SKILLS_SUBDIR)
       const entries = await reader.list(root)

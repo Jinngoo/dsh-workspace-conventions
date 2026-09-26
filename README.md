@@ -76,6 +76,54 @@ docs/verification/    # 实测证据归档（正向 / 降级 / 反向三组，�
 docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-presets/memory/ 目录（其中保留旧包名属历史准确性）
 ```
 
+## 项目级开关（`.dsh/workspace.yml`）
+
+三层各自可以按项目开关——profile 的一行服务所有工作区，所以"这个仓库关掉记忆"只能由项目自己的文件说。
+
+```yaml
+# <项目>/.dsh/workspace.yml
+workspace-conventions:
+  memory: read-only     # true/enabled（默认）| read-only | false/disabled
+  rules: false
+  skills: false
+```
+
+- `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常——只读不等于失明。
+- 未知键或类型不对会**报错并停用三层**：只报错却照跑默认值，等于让那个开关静默失效。
+- 文件缺失 = 三层全开，未配置的项目行为完全不变。
+- 格式、错误语义、缓存与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
+
+`pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。
+
+### 各开关下的实际行为
+
+| 开关 | 提示段落 | 工具 | 是否扫描/写入 |
+|---|---|---|---|
+| `memory` 缺省 | 注入索引段落 | 六个工具全部可用 | 读写都走已探测到的后端 |
+| `memory: read-only` | **不注入** | 读与诊断可用；`memory_write` / `memory_promote` 被拒并说明原因 | 只读 |
+| `memory: false` / `disabled` | 不注入 | 六个工具**全部**被拒 | 不写 |
+| `rules` 缺省 | 注入常驻册，条件册按触发注入 | `rule_read` / `rule_status` 可用 | 读 `.workbuddy/rules/` |
+| `rules: false` | 不注入 | 两者都被拒 | 不读、不再记录触发 |
+| `skills` 缺省 | ——（技能不是段落） | 进原生技能目录，由标准 `skill` 工具加载 | 扫描 `.workbuddy/skills/` |
+| `skills: false` | —— | 目录里什么都没有 | **不扫描** |
+
+三条需要解释的取舍：
+
+- **工具是进程级注册的**（`ctx.tools.register` 在加载时跑一次，那会儿还不知道任何工作区），Cordis 也无法按工作区注销。所以"关层"的等价物是**调用被拒**，且拒绝信息会指明是哪个文件里的哪个开关——而不是返回一个空结果让模型误以为"这个工作区什么都没有"。
+- **只读时不注入记忆段落**：该段落承载的就是索引正文。只读工作区仍可用 `memory_read` / `memory_search` 取到同样内容，每轮再注入一遍只是重复付费。
+- **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（它带 `config` 字段），或直接看 `pnpm verify:workbuddy` 的报告开头。
+
+### 目录探测与开关无关
+
+记忆后端是按**目录存在与否**选定的，与上面的开关相互独立：
+
+| 项目里有什么 | 生效后端（`memory_status` 的 `mode`） |
+|---|---|
+| `.workbuddy/memory/` | `workbuddy`（兼容模式，按 WorkBuddy 原生准则注入写入准则） |
+| 只有 `.dsh/memory/`，或两者都没有 | `dsh-default`（默认模式） |
+
+上述优先级同样适用于 `.workbuddy/rules/`（规则只认这一处）。`memory` 开关只决定**是否使用**探测到的后端，不改变探测结果。
+
 ## 构建与测试
 
 ```powershell

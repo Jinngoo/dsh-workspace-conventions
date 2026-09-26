@@ -120,6 +120,22 @@ export function parsePatch(text: string, source: string): PatchDocument {
 }
 
 /**
+ * Read a file as a plain block map, without interpreting any key.
+ *
+ * This is the same restricted YAML slice as {@link parsePatch}, exposed for
+ * callers whose file is a configuration map rather than a row list — the
+ * workspace configuration file, for instance. The reader is deliberately shared
+ * instead of duplicated so both files agree on what they accept and on how they
+ * name the line they refuse.
+ * @param text - the file contents.
+ * @param source - the path reported in diagnostics.
+ * @returns the top-level keys, in file order.
+ */
+export function parseMapDocument(text: string, source: string): { readonly [key: string]: PatchValue } {
+  return parseMapValue(toLines(text, source), source)
+}
+
+/**
  * Read a patch file from disk.
  * @param path - the patch file path.
  * @returns the parsed document.
@@ -214,6 +230,49 @@ export function defaultProfileDir(env: NodeJS.ProcessEnv = process.env): string 
   const profile = env['DSH_PROFILE']
   const name = profile === undefined || profile.trim() === '' ? 'web' : profile.trim()
   return join(home.trim(), 'profiles', name)
+}
+
+/**
+ * Read a whole file as one block map: `key:` mappings, or `- ` items that each
+ * become an entry. Line numbers are not tracked here, because a configuration
+ * map has no rows to report against; a malformed line still names itself.
+ */
+function parseMapValue(lines: readonly Line[], source: string): { [key: string]: PatchValue } {
+  const value: { [key: string]: PatchValue } = {}
+  let at = 0
+
+  while (at < lines.length) {
+    const line = lines[at] as Line
+    if (line.indent !== 0) {
+      throw new PatchFormatError(line.number, `unexpected indentation of ${line.indent} at the top level (${source})`)
+    }
+
+    if (isSequenceItem(line)) {
+      const item = parseItem(lines, at, lines.length)
+      if (!isMap(item.value)) throw new PatchFormatError(line.number, 'a top-level sequence item must be a mapping')
+      for (const key of Object.keys(item.value)) {
+        if (Object.hasOwn(value, key)) throw new PatchFormatError(line.number, `duplicate key \`${key}\``)
+        Reflect.set(value, key, Reflect.get(item.value, key))
+      }
+      at = item.next
+      continue
+    }
+
+    const pair = parsePair(line, lines, 0)
+    if (Object.hasOwn(value, pair.key)) throw new PatchFormatError(line.number, `duplicate key \`${pair.key}\``)
+
+    if (pair.childIndent === undefined) {
+      Reflect.set(value, pair.key, pair.value ?? null)
+      at += 1
+      continue
+    }
+
+    const run = parseNested(lines, at + 1, lines.length, pair.childIndent, lines[at + 1] as Line)
+    Reflect.set(value, pair.key, run.value)
+    at = run.next
+  }
+
+  return value
 }
 
 /** Read the patch rows of the file: `- ` items, or bare `key:` mappings. */
