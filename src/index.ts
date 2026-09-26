@@ -1,45 +1,30 @@
 /**
- * DSH workspace memory as a composable row.
+ * DSH workspace conventions as a composable row: memory, rules and skills.
  *
  * One agent preset mounts this row once; each session joining that scope reads
- * and writes memory inside **its own working directory**. Two backends are
- * supported and the choice is automatic:
+ * and writes inside **its own working directory**. Three compatibility layers
+ * share one store probe and one principle — if the workspace already keeps a
+ * WorkBuddy store, follow that system's own shape and criteria; otherwise fall
+ * back to a DSH-default location with the same model.
  *
- * - **WorkBuddy-compatible** (`.workbuddy/memory/`) when that directory already
- *   exists. The row then mirrors that system's own writing criteria: its
- *   `MEMORY.md` is an index and preference file only (details, current state and
- *   troubleshooting belong in documents), dated files are append-only, and
- *   "小事、小修改、一次性操作与排错过程不写记忆" is enforced in code. Its dated
- *   ledgers are found in either layout that system really uses — flat in the
- *   store root, or one subdirectory per computer — and a new ledger follows
- *   whichever layout the store already has.
- * - **DSH default** (`.dsh/memory/`) otherwise, with the same index-plus-dated-ledger
- *   shape, so switching between the two changes nothing about how a model uses it.
+ * | layer | WorkBuddy source | DSH fallback | how it reaches the model |
+ * |---|---|---|---|
+ * | memory | `.workbuddy/memory/` | `.dsh/memory/` | prompt section + six tools |
+ * | rules | `.workbuddy/rules/*.md` | — | prompt section + two tools |
+ * | skills | `.workbuddy/skills/` | — | a registered `ctx.skills` provider |
  *
- * Memory is workspace-scoped. Every resolved entry carries a `scope`, and the
- * resolution is a list of scopes, which is the reserved seam for a future global
- * memory scope: registering one is additive, and the read/write orchestration
- * does not change.
- *
- * Three layers, identical in meaning across both backends:
- *
- * | layer | lifetime | contents |
- * |---|---|---|
- * | index (`MEMORY.md`) | injected every turn | hard constraints, stable preferences, long-lived conventions, document pointers |
- * | ledger (`YYYY-MM-DD.md`) | append-only, read on demand | durable facts that need a record but not permanent context |
- * | evidence | wherever it already lives | documents and code; the index keeps pointers rather than copies |
- *
- * The dominant failure mode of a memory system is not "too little stored" but
- * "too much stored": an index that grows without bound poisons the context every
- * turn. Admission is therefore a first-class step here, and hard rejections
- * (secrets, empty or over-long entries) cannot be forced.
+ * The rules layer reproduces WorkBuddy's own contract: `alwaysApply: true` books
+ * are injected every turn, `paths:` books are injected once a matching file is
+ * read or changed, and a book is capped at 16 KB. The skills layer publishes
+ * bundles through the ordinary skill catalog instead of a private loader, so the
+ * stock `skill` tool loads them with their relative resources resolved.
  *
  * Two constraints are load-bearing and easy to get wrong:
  *
  * 1. `systemPrompt.context()` is **synchronous** — `assemble()` does not await a
  *    provider, so an `async` provider returns a Promise instead of a string and
- *    fails every turn. The probe therefore runs asynchronously into a cache and
- *    the provider renders that cache synchronously.
+ *    fails every turn. Every probe therefore runs asynchronously into a cache and
+ *    the providers render that cache synchronously.
  * 2. `fs.writeText()` must be given the **session** sandbox policy. Without a
  *    session, the sandbox falls back to the deployment's default workspace root
  *    and denies writes inside this session's own workspace.
@@ -48,403 +33,117 @@
  */
 
 import { hostname } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
 import type {} from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 
-/** Cordis plugin name. */
+import { DEFAULT_DIR, INDEX_FILE, MEMORY_SUBDIR, RULES_SUBDIR, WORKBUDDY_DIR } from './layout.js'
+import {
+  ENTRY_KINDS,
+  HARD_RULES,
+  evaluateEntry,
+  ledgerForDate,
+  ledgerWritePath,
+  renderEntry,
+  scanLedgers,
+  upsertIndexEntry,
+  type DirEntry,
+  type HostDirScan,
+  type LedgerFile,
+  type LedgerLayout,
+} from './memory.js'
+import {
+  RULES_DIR_REL,
+  RULE_FILE_BYTES,
+  matchingRules,
+  parseRule,
+  renderRulesSection,
+  type RuleDefinition,
+} from './rules.js'
+import {
+  SKILLS_DIR_REL,
+  createWorkbuddySkillProvider,
+  type SkillStoreReader,
+} from './skills.js'
+import { dateStamp, normalizeText, toPosix } from './text.js'
+
 export const name = 'workspace-memory'
 
 /**
- * Every service this row reaches. All five are host-plane and are only consumed;
+ * Every service this row reaches. All six are host-plane and are only consumed;
  * the row publishes nothing, so it needs no `isolate` realm. `tools` is required
- * because registration goes through `ctx.tools.register`.
+ * because registration goes through `ctx.tools.register`, and `skills` because
+ * the WorkBuddy skill bundles are published as a provider on the shared registry
+ * rather than through a private loader.
  */
-export const inject = ['fs', 'agents', 'systemPrompt', 'sandboxPolicy', 'tools']
+export const inject = ['fs', 'agents', 'systemPrompt', 'sandboxPolicy', 'tools', 'skills']
 
-/** Entry classifications shared by both backends. */
-export const ENTRY_KINDS = [
-  'decision',
-  'preference',
-  'convention',
-  'pitfall',
-  'environment',
-  'constraint',
-  'fact',
-] as const
+export {
+  DEFAULT_DIR,
+  ENTRY_KINDS,
+  HARD_RULES,
+  INDEX_FILE,
+  RULES_DIR_REL,
+  RULE_FILE_BYTES,
+  SKILLS_DIR_REL,
+  WORKBUDDY_DIR,
+  dateStamp,
+  evaluateEntry,
+  ledgerForDate,
+  ledgerWritePath,
+  normalizeText,
+  renderEntry,
+  scanLedgers,
+  toPosix,
+  upsertIndexEntry,
+}
+export { detectSectionLevel, parseIndexDocument } from './memory.js'
+export { parseFrontmatter, readFrontmatterBoolean } from './frontmatter.js'
+export { expandBraces, matchGlob } from './glob.js'
+export { matchingRules, parseRule, renderRulesSection } from './rules.js'
+export { parseSkill } from './skills.js'
+export type { EntryKind, EntryVerdict, LedgerEntry, LedgerLayout, LedgerScan } from './memory.js'
+export type { Frontmatter, BooleanRead } from './frontmatter.js'
+export type { RuleDefinition } from './rules.js'
+export type { WorkbuddySkill } from './skills.js'
 
-/** One entry classification. */
-export type EntryKind = (typeof ENTRY_KINDS)[number]
-
-/** Activity verbs that mark a line as play-by-play rather than a durable fact. */
-const ACTIVITY_VERBS: readonly string[] = [
-  '修复了', '修改了', '更新了', '完成了', '新建了', '删除了', '重构了', '实现了',
-  '检查了', '排查了', '运行了', '编译了', '提交了', '调整了',
-  'fixed', 'updated', 'implemented', 'completed', 'refactored',
-]
-
-/** Rejections that `force` cannot bypass. */
-const HARD_RULES: readonly { readonly re: RegExp, readonly why: string }[] = [
-  { re: /(api[-_]?key|secret|password|passwd|token|credential)\s*[:=]\s*\S{8,}/i, why: '疑似密钥或凭据，记忆文件不得存放秘密' },
-  { re: /-----BEGIN [A-Z ]*PRIVATE KEY-----/, why: '疑似私钥内容' },
-  { re: /[\w.+-]+@[\w-]+\.[\w.]{2,}/, why: '疑似个人邮箱等 PII，未经确认不得写入' },
-]
-
-/** A backend's verdict on one candidate entry. */
-export interface EntryVerdict {
-  /** Whether the entry may be written at all. */
-  readonly allowed: boolean
-  /** Unconditional refusals; `force` cannot override them. */
-  readonly reasons: readonly string[]
-  /** Advisories that require an explicit `force` at the call site. */
-  readonly warnings: readonly string[]
-  /** The resolved classification. */
-  readonly kind: EntryKind
-  /** The normalized entry body. */
-  readonly body: string
+/** Plugin config: how much of each store is injected each turn, and per-book caps. */
+export interface Config {
+  /**
+   * Byte cap on the index text injected into the prompt every turn. The
+   * remainder stays reachable through `memory_read`. Keeps a large WorkBuddy
+   * index from crowding out the conversation.
+   */
+  indexPromptBytes: number
+  /**
+   * Byte cap on the whole injected rules section. 常驻册 are placed first and
+   * survive truncation; a triggered 条件册 that does not fit degrades to a
+   * heading plus a `rule_read` pointer rather than disappearing. This is a guard
+   * rail against a pathological rules directory, not an allocation: a workspace
+   * whose books fit pays only for what they actually cost, and the default is
+   * sized so a project can hold a few standing books plus all of its conditional
+   * books without losing one.
+   */
+  rulesPromptBytes: number
+  /** Per-book byte cap, matching WorkBuddy's own ~16 KB contract. */
+  ruleFileBytes: number
 }
 
-/** Normalize any value to a primitive, trimmed string. */
-export function normalizeText(value: unknown): string {
-  return String(value ?? '')
-    .replace(/\r\n/g, '\n')
-    .replace(/[ \t]+$/gm, '')
-    .trim()
-}
-
-/**
- * Decide whether one candidate entry may be written at all.
- *
- * Hard rejections are unconditional. Soft warnings mean "this looks like the
- * content the criteria exclude" and require an explicit `force`, which is the
- * call site's opportunity to rewrite the line as a conclusion instead.
- * @param content - the candidate line.
- * @param kind - the caller's classification; anything unknown falls back to `fact`.
- * @returns the verdict, including the normalized body and classification.
- */
-export function evaluateEntry(content: unknown, kind: unknown): EntryVerdict {
-  const body = normalizeText(content)
-  const chosen: EntryKind = typeof kind === 'string' && (ENTRY_KINDS as readonly string[]).includes(kind)
-    ? kind as EntryKind
-    : 'fact'
-  const reasons: string[] = []
-  const warnings: string[] = []
-
-  if (body.length === 0) reasons.push('内容为空')
-  else if (body.length < 8) reasons.push('内容过短，无法形成可复用的记忆条目')
-  for (const rule of HARD_RULES) if (rule.re.test(body)) reasons.push(rule.why)
-
-  if (ACTIVITY_VERBS.some((v) => body.includes(v))) {
-    warnings.push('疑似一次性执行流水账（会话日志已覆盖），只有跨会话仍有价值才应记录')
-  }
-  if (body.length > 1200) warnings.push('单条记忆偏长，建议精简或下沉到文档')
-
-  return { allowed: reasons.length === 0, reasons, warnings, kind: chosen, body }
-}
-
-/** Collapse a value to a single line, capped for use as a heading. */
-function oneLine(value: unknown, max = 120): string {
-  const s = normalizeText(value).replace(/\s*\n\s*/g, ' ').replace(/\s{2,}/g, ' ')
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s
-}
-
-function pad2(n: number): string {
-  return String(n).padStart(2, '0')
-}
-
-/** `YYYY-MM-DD` in local time. */
-export function dateStamp(at: Date = new Date()): string {
-  return `${at.getFullYear()}-${pad2(at.getMonth() + 1)}-${pad2(at.getDate())}`
-}
-
-/** `HH:MM` in local time. */
-function clockStamp(at: Date = new Date()): string {
-  return `${pad2(at.getHours())}:${pad2(at.getMinutes())}`
-}
-
-/** One entry to render into a ledger. */
-export interface LedgerEntry {
-  /** The durable content. */
-  readonly content: string
-  /** Classification written into the heading. */
-  readonly kind: EntryKind
-  /** Memory scope label; defaults to `workspace`. */
-  readonly scope?: string
-  /** Optional one-line title when the content is long. */
-  readonly title?: string
-  /** Optional tags. */
-  readonly tags?: readonly string[]
-  /** Timestamp to record; defaults to now. */
-  readonly at?: Date
-}
-
-/**
- * Render one ledger entry block.
- * @param entry - the entry to render.
- * @returns the markdown block, without a trailing newline.
- */
-export function renderEntry(entry: LedgerEntry): string {
-  const body = normalizeText(entry.content)
-  const title = oneLine(entry.title ?? body, 120)
-  const tags = (entry.tags ?? []).map((t) => oneLine(t, 40)).filter(Boolean)
-  const at = entry.at ?? new Date()
-  const lines = [`## ${clockStamp(at)} · ${entry.kind}`, `- scope: ${entry.scope ?? 'workspace'}`]
-  if (tags.length > 0) lines.push(`- tags: ${tags.join(', ')}`)
-  const rendered = title === body ? body : `${title}\n\n${body}`
-  return `${lines.join('\n')}\n\n${rendered}`
-}
-
-/** A heading line inside an index document. */
-export interface IndexSection {
-  /** Heading depth. */
-  readonly level: number
-  /** Heading text. */
-  readonly title: string
-  /** Line index of the heading. */
-  readonly start: number
-  /** Line index one past the section's last line. */
-  readonly end: number
-}
-
-const SECTION_RE = /^(#{1,3})\s+(.+?)\s*$/
-
-/**
- * Decide which heading level carries the index's sections.
- *
- * Two real layouts must both work: WorkBuddy's native `# 项目记忆` followed by
- * `## 一、…` sections (the lone level-1 heading is the document title), and a
- * document that starts straight at `## 一、…` (the shallowest heading IS the
- * section level).
- * @param headings - every heading's depth, in document order.
- * @returns the heading level whose headings are sections.
- */
-export function detectSectionLevel(headings: readonly { readonly level: number }[]): number {
-  if (headings.length === 0) return 1
-  const min = Math.min(...headings.map((h) => h.level))
-  const atMin = headings.filter((h) => h.level === min).length
-  if (atMin === 1) {
-    const deeper = headings.filter((h) => h.level > min)
-    if (deeper.length > 0) return Math.min(...deeper.map((h) => h.level))
-  }
-  return min
-}
-
-/** One parsed index document. */
-export interface ParsedIndex {
-  /** Everything before the first section heading. */
-  readonly preamble: string
-  /** The document's lines. */
-  readonly lines: readonly string[]
-  /** The section headings, in document order. */
-  readonly sections: readonly IndexSection[]
-}
-
-/**
- * Split an index document into its preamble and section offsets.
- * @param source - the index text.
- * @returns the preamble, every line, and the section spans.
- */
-export function parseIndexDocument(source: unknown): ParsedIndex {
-  const lines = normalizeText(source).split('\n')
-  const heads: { at: number, level: number, title: string }[] = []
-  lines.forEach((line, at) => {
-    const m = SECTION_RE.exec(line)
-    if (m !== null) heads.push({ at, level: (m[1] ?? '').length, title: m[2] ?? '' })
-  })
-  if (heads.length === 0) return { preamble: lines.join('\n'), lines, sections: [] }
-
-  const level = detectSectionLevel(heads)
-  const tops = heads.filter((h) => h.level === level)
-  const sections: IndexSection[] = tops.map((head, i) => {
-    const next = tops[i + 1]
-    return {
-      level: head.level,
-      title: head.title,
-      start: head.at,
-      end: next === undefined ? lines.length : next.at,
-    }
-  })
-  const first = tops[0]
-  return { preamble: lines.slice(0, first === undefined ? 0 : first.at).join('\n'), lines, sections }
-}
-
-/** The result of inserting one bullet into an index. */
-export interface IndexUpsert {
-  /** The next index text. */
-  readonly text: string
-  /** Whether the text differs from the input. */
-  readonly changed: boolean
-  /** Whether the target section had to be created. */
-  readonly createdSection: boolean
-}
-
-/**
- * Insert one bullet into a named index section.
- *
- * The operation is additive and idempotent: existing prose, other sections and
- * the preamble are preserved byte for byte, and a repeated entry reports
- * `changed: false` rather than duplicating. A missing section is created.
- * @param source - the current index text.
- * @param section - the target section title.
- * @param item - the bullet content.
- * @returns the next index text plus what changed.
- */
-export function upsertIndexEntry(source: unknown, section: string, item: string): IndexUpsert {
-  const body = normalizeText(source)
-  const entry = normalizeText(item)
-  if (entry.length === 0) throw new Error('memory index entry must not be empty')
-
-  const bullet = `- ${entry.split('\n').join('\n  ')}`
-  if (body.includes(entry)) return { text: body, changed: false, createdSection: false }
-
-  const doc = parseIndexDocument(body)
-  const target = doc.sections.find((s) => s.title === section)
-  if (target === undefined) {
-    const appended = body.length > 0 ? `${body}\n\n## ${section}\n${bullet}` : `## ${section}\n${bullet}`
-    return { text: appended, changed: true, createdSection: true }
-  }
-
-  let at = target.end
-  for (let i = target.start + 1; i < target.end; i += 1) {
-    const m = SECTION_RE.exec(doc.lines[i] ?? '')
-    if (m !== null && (m[1] ?? '').length <= target.level) { at = i; break }
-  }
-  // Trim trailing blank lines inside the section so bullets do not stack gaps.
-  while (at - 1 > target.start && (doc.lines[at - 1] ?? '').trim() === '') at -= 1
-
-  const next = [...doc.lines.slice(0, at), bullet, ...doc.lines.slice(at)]
-  return { text: next.join('\n'), changed: true, createdSection: false }
-}
-
-/**
- * Present a path with forward slashes so prompt text is platform-neutral.
- * @param p - the path to present.
- * @returns the path with `/` separators.
- */
-export function toPosix(p: string): string {
-  return p.split('\\').join('/')
-}
-
-/**
- * How a store lays out its dated ledgers: flat in the store root, or one
- * subdirectory per computer.
- */
-export type LedgerLayout = 'flat' | 'host'
-
-/** One direct child of a store directory, reduced to what discovery needs. */
-export interface DirEntry {
-  /** Basename of the child. */
-  readonly name: string
-  /** Kind reported by the filesystem backend, when it reports one. */
-  readonly type?: string
-}
-
-/** One subdirectory of a store directory and its direct children. */
-export interface HostDirScan {
-  /** The subdirectory name — a computer name under the per-computer layout. */
-  readonly name: string
-  /** Its direct children. */
-  readonly entries: readonly DirEntry[]
-}
-
-/** One dated ledger file found inside a store. */
-export interface LedgerFile {
-  /** The `YYYY-MM-DD` date encoded in the file name. */
-  readonly date: string
-  /** Store-relative path with `/` separators: `YYYY-MM-DD.md` or `<host>/YYYY-MM-DD.md`. */
-  readonly rel: string
-  /** The computer-name subdirectory holding the file; `''` in the flat layout. */
-  readonly host: string
-}
-
-/** A store's dated-ledger inventory plus where new ledgers belong. */
-export interface LedgerScan {
-  /** Every dated ledger found, newest first. */
-  readonly ledgers: readonly LedgerFile[]
-  /** The layout discovered on disk. */
-  readonly layout: LedgerLayout
-  /** Computer-name subdirectory receiving new ledgers; `''` in the flat layout. */
-  readonly hostDir: string
-}
-
-const LEDGER_FILE_RE = /^\d{4}-\d{2}-\d{2}\.md$/
-
-/**
- * Inventory one store's dated ledgers and decide where new ones belong.
- *
- * WorkBuddy writes dated ledgers either flat (`memory/YYYY-MM-DD.md`) or one
- * subdirectory per computer (`memory/<host>/YYYY-MM-DD.md`). Nothing declares
- * which one a workspace uses, so the directory's own shape is the only evidence
- * and this stays a probe rather than a setting. A dated file inside a
- * subdirectory marks the store as per-computer, and so does a subdirectory
- * already named for this machine — the first write on a fresh machine must land
- * beside its siblings instead of in the store root. An exact name match beats a
- * case-insensitive one, because on a case-sensitive filesystem two spellings of
- * one name are two different machines.
- * @param root - the store directory's own children.
- * @param subdirs - one scan per subdirectory of the store directory.
- * @param host - this computer's name, as the OS reports it.
- * @returns the inventory plus the write-target decision.
- */
-export function scanLedgers(root: readonly DirEntry[], subdirs: readonly HostDirScan[], host: string): LedgerScan {
-  const ledgers: LedgerFile[] = []
-  for (const entry of root) {
-    if (entry.type === 'file' && LEDGER_FILE_RE.test(entry.name)) {
-      ledgers.push({ date: entry.name.slice(0, -3), rel: entry.name, host: '' })
-    }
-  }
-  for (const subdir of subdirs) {
-    for (const entry of subdir.entries) {
-      if (entry.type !== 'file' || !LEDGER_FILE_RE.test(entry.name)) continue
-      ledgers.push({ date: entry.name.slice(0, -3), rel: `${subdir.name}/${entry.name}`, host: subdir.name })
-    }
-  }
-  const named = subdirs.find((d) => d.name === host)
-    ?? subdirs.find((d) => d.name.toLowerCase() === host.toLowerCase())
-  const perComputer = ledgers.some((f) => f.host !== '') || named !== undefined
-  ledgers.sort((a, b) => b.date.localeCompare(a.date) || a.rel.localeCompare(b.rel))
-  return {
-    ledgers,
-    layout: perComputer ? 'host' : 'flat',
-    hostDir: named?.name ?? (perComputer ? host : ''),
-  }
-}
-
-/**
- * The store-relative path one date's ledger is written to.
- * @param scan - the store's inventory.
- * @param date - `YYYY-MM-DD`.
- * @returns a `/`-separated relative path.
- */
-export function ledgerWritePath(scan: LedgerScan, date: string): string {
-  return scan.layout === 'host' ? `${scan.hostDir}/${date}.md` : `${date}.md`
-}
-
-/**
- * The ledger to read for one date.
- *
- * Preference is this computer's own file, then the store root, then — only when
- * it is the single ledger for that date — another computer's, so a day recorded
- * elsewhere stays readable while an ambiguous date never silently resolves to
- * the wrong machine.
- * @param scan - the store's inventory.
- * @param date - `YYYY-MM-DD`.
- * @returns the chosen ledger, or `undefined` when that date has none.
- */
-export function ledgerForDate(scan: LedgerScan, date: string): LedgerFile | undefined {
-  const sameDate = scan.ledgers.filter((f) => f.date === date)
-  return sameDate.find((f) => f.host === scan.hostDir)
-    ?? sameDate.find((f) => f.host === '')
-    ?? (sameDate.length === 1 ? sameDate[0] : undefined)
-}
+/** Runtime schema for the row. */
+export const Config: z<Config> = z.object({
+  indexPromptBytes: z.number().default(7000),
+  rulesPromptBytes: z.number().default(48 * 1024),
+  ruleFileBytes: z.number().default(RULE_FILE_BYTES),
+})
 
 /** The resolved state of one workspace's memory store. */
 interface WorkspaceMemoryState {
@@ -473,44 +172,49 @@ interface WorkspaceMemoryState {
   }[]
 }
 
-/** Directory name of the WorkBuddy-compatible store. */
-export const WORKBUDDY_DIR = '.workbuddy'
-
-/** Directory name of the DSH default store. */
-export const DEFAULT_DIR = '.dsh'
-
-/** Index file name used by both backends. */
-export const INDEX_FILE = 'MEMORY.md'
-
-/** Plugin config: how much of the index is injected each turn. */
-export interface Config {
-  /**
-   * Byte cap on the index text injected into the prompt every turn. The
-   * remainder stays reachable through `memory_read`. Keeps a large WorkBuddy
-   * index from crowding out the conversation.
-   */
-  indexPromptBytes: number
+/** The resolved state of one workspace's rule directory. */
+interface WorkspaceRulesState {
+  /** Absolute rules directory. */
+  readonly dir: string
+  /** Workspace-relative rules directory, for display. */
+  readonly dirRel: string
+  /** Whether the rules directory exists. */
+  readonly exists: boolean
+  /** Every parsed book, sorted by file name. */
+  readonly rules: readonly RuleDefinition[]
 }
 
-/** Runtime schema for the row. */
-export const Config: z<Config> = z.object({
-  indexPromptBytes: z.number().default(7000),
-})
+const EMPTY_RULES: ReadonlySet<string> = new Set()
 
 /**
- * Register the memory tools and the prompt section for the mounting scope.
- * @param ctx - an agent-scope context supplying `fs`, `agents`, `systemPrompt` and `sandboxPolicy`.
- * @param config - the injected-index byte cap.
+ * Register the memory tools, the rules tools, the two prompt sections and the
+ * skill provider for the mounting scope.
+ * @param ctx - an agent-scope context supplying `fs`, `agents`, `systemPrompt`, `sandboxPolicy`, `tools` and `skills`.
+ * @param config - the injected-index cap, the rules cap and the per-book cap.
  */
 export function apply(ctx: Context, config: Config): void {
   const indexPromptBytes = config.indexPromptBytes
+  const rulesPromptBytes = config.rulesPromptBytes
+  const ruleFileBytes = config.ruleFileBytes
   const fs = ctx.fs
   const agents = ctx.agents
   const prompt = ctx.systemPrompt
   const host = hostname()
 
   const cache = new Map<string, WorkspaceMemoryState>()
+  const rulesCache = new Map<string, WorkspaceRulesState>()
+  /**
+   * Conditional books already triggered, keyed by workspace.
+   *
+   * Workspace rather than session: a rule book describes the workspace, and once
+   * a matching file has been touched in this workspace the book is relevant to
+   * the ongoing work. Over-injecting a rule is far safer than never injecting it,
+   * and this avoids depending on agent-object identity between the tool-result
+   * listener and the synchronous prompt provider.
+   */
+  const triggered = new Map<string, Set<string>>()
   const sessions = new Map<string, unknown>()
+  let invalidateSkills: (() => void) | undefined
 
   const agentNow = (): unknown => agents.currentInitiator() as unknown
 
@@ -569,7 +273,7 @@ export function apply(ctx: Context, config: Config): void {
     return toPosix(t.displayPath)
   }
 
-  /** Probe both backends for one workspace and resolve the active one. */
+  /** Probe both memory backends for one workspace and resolve the active one. */
   const loadState = async (workspace: string): Promise<WorkspaceMemoryState> => {
     const probe = async (backendName: string, dir: string) => {
       const index = join(dir, INDEX_FILE)
@@ -599,8 +303,8 @@ export function apply(ctx: Context, config: Config): void {
       }
     }
 
-    const workbuddy = await probe('workbuddy', join(workspace, WORKBUDDY_DIR, 'memory'))
-    const fallback = await probe('dsh-default', join(workspace, DEFAULT_DIR, 'memory'))
+    const workbuddy = await probe('workbuddy', join(workspace, WORKBUDDY_DIR, MEMORY_SUBDIR))
+    const fallback = await probe('dsh-default', join(workspace, DEFAULT_DIR, MEMORY_SUBDIR))
     // An existing WorkBuddy memory system wins; the DSH default is the fallback.
     const active = workbuddy.exists ? workbuddy : fallback
 
@@ -629,15 +333,39 @@ export function apply(ctx: Context, config: Config): void {
     return state
   }
 
+  /** Read every rule book in one workspace. */
+  const loadRules = async (workspace: string): Promise<WorkspaceRulesState> => {
+    const dir = join(workspace, WORKBUDDY_DIR, RULES_SUBDIR)
+    const info = await statAt(dir)
+    const exists = info?.type === 'directory'
+    const entries: readonly DirEntry[] = exists ? await listAt(dir) : []
+    const rules: RuleDefinition[] = []
+    for (const entry of entries) {
+      if (entry.type !== 'file') continue
+      if (entry.name.startsWith('.') || !entry.name.toLowerCase().endsWith('.md')) continue
+      const source = await readAt(join(dir, entry.name))
+      if (source === undefined) continue
+      rules.push(parseRule(entry.name, source))
+    }
+    rules.sort((left, right) => left.file.localeCompare(right.file))
+    const state: WorkspaceRulesState = { dir: toPosix(dir), dirRel: RULES_DIR_REL, exists, rules }
+    rulesCache.set(workspace, state)
+    return state
+  }
+
   const refresh = (workspace: string | undefined): void => {
     if (workspace === undefined) return
     void loadState(workspace).catch(() => undefined)
+    void loadRules(workspace).catch(() => undefined)
   }
 
   const stateFor = async (workspace: string): Promise<WorkspaceMemoryState> =>
     cache.get(workspace) ?? await loadState(workspace)
 
-  /** Render the prompt section from a cached snapshot. Total: it never throws. */
+  const rulesFor = async (workspace: string): Promise<WorkspaceRulesState> =>
+    rulesCache.get(workspace) ?? await loadRules(workspace)
+
+  /** Render the memory prompt section from a cached snapshot. Total: it never throws. */
   const renderPrompt = (workspace: string, state: WorkspaceMemoryState): string => {
     const criteria = state.compat
       ? [
@@ -949,9 +677,105 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  // The prompt provider is SYNCHRONOUS by contract: `assemble()` calls it without
-  // awaiting. The asynchronous probe feeds the cache; this only renders it, and
-  // reports the one-turn warm-up state until the cache is populated.
+  ctx.tools.register(defineTool({
+    name: 'rule_status',
+    description:
+      '报告工作区规则体系（WorkBuddy 的 .workbuddy/rules/）：目录是否存在、每册的分类（alwaysApply 常驻册 / paths 条件册 / 按需规则）、'
+      + '触发 glob，以及本会话已触发的条件册。常驻册每轮自动注入；条件册在被读写匹配文件后自动注入。',
+    parameters: {},
+    output: jsonOutput,
+    async execute(): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const state = await rulesFor(workspace)
+      const active = triggered.get(workspace) ?? EMPTY_RULES
+      return {
+        ok: true,
+        workspace: toPosix(workspace),
+        rulesDir: state.dirRel,
+        absoluteDir: state.dir,
+        exists: state.exists,
+        budgets: { rulesPromptBytes, ruleFileBytes },
+        total: state.rules.length,
+        books: state.rules.map((rule) => ({
+          file: rule.file,
+          title: rule.title,
+          kind: rule.alwaysApply ? 'always' : rule.paths.length > 0 ? 'conditional' : 'on-demand',
+          paths: rule.paths,
+          bytes: rule.bytes,
+          triggered: active.has(rule.rel),
+          issue: rule.issue,
+        })),
+        note: '条件册只按「读/写/编辑匹配文件」触发；用 shell 改文件不会触发（DSH 的触碰追踪只认这三个工具的 file_path 参数）。',
+      } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'rule_read',
+    description:
+      '读取一册工作区规则的完整正文（绕过 16 KB 注入上限）。用于按需规则、未被预算注入的条件册，'
+      + '以及新建文件前的兜底——新建文件不一定触发条件册注入。',
+    parameters: { file: { type: 'string' as const, required: true, description: '册文件名或工作区相对路径，例如 01-协作红线.md' } },
+    output: jsonOutput,
+    async execute(args): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const state = await rulesFor(workspace)
+      const query = normalizeText(args.file).replace(/^\.\//, '')
+      const byRel = state.rules.find((rule) => rule.rel === query || rule.rel === `${state.dirRel}/${query}`)
+      const byName = state.rules.find((rule) => rule.file === query)
+      const rule = byRel ?? byName
+      if (rule === undefined) {
+        return {
+          ok: false,
+          error: `未找到规则册：${query}`,
+          available: state.rules.map((r) => r.file),
+        } as unknown as JsonValue
+      }
+      return {
+        ok: true,
+        file: rule.file,
+        path: rule.rel,
+        title: rule.title,
+        kind: rule.alwaysApply ? 'always' : rule.paths.length > 0 ? 'conditional' : 'on-demand',
+        paths: rule.paths,
+        bytes: rule.bytes,
+        truncatedInPrompt: rule.bytes > ruleFileBytes,
+        text: rule.body,
+      } as unknown as JsonValue
+    },
+  }))
+
+  // The prompt providers are SYNCHRONOUS by contract: `assemble()` calls them
+  // without awaiting. Their asynchronous probes feed the caches; these only
+  // render those caches.
+  ctx.effect(() => prompt.context({
+    name: 'workspace-rules',
+    order: 55,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        const state = rulesCache.get(workspace)
+        if (state === undefined) {
+          refresh(workspace)
+          return ''
+        }
+        return renderRulesSection({
+          dir: state.dirRel,
+          rules: state.rules,
+          active: triggered.get(workspace) ?? EMPTY_RULES,
+          ruleFileBytes,
+          maxBytes: rulesPromptBytes,
+        })
+      } catch { return '' }
+    },
+  }), 'workspace-memory.rules')
+
   ctx.effect(() => prompt.context({
     name: 'workspace-memory',
     order: 60,
@@ -972,8 +796,68 @@ export function apply(ctx: Context, config: Config): void {
     },
   }), 'workspace-memory.context')
 
-  // Warm the cache for every session this scope serves, so the synchronous
-  // provider has content on the session's first turn.
+  // Publish `.workbuddy/skills` through the ordinary skill registry, so the
+  // stock `skill` tool loads those bundles with their relative resources.
+  const skillReader: SkillStoreReader = {
+    list: async (dir) => listAt(dir),
+    read: async (path) => readAt(path),
+  }
+  ctx.effect(() => ctx.skills.registerProvider((control) => {
+    invalidateSkills = control.invalidate
+    return createWorkbuddySkillProvider(skillReader, 'workspace-workbuddy-skills', (message) => {
+      ctx.logger.warn(message)
+    })
+  }), 'workspace-memory.skills')
+
+  /**
+   * The workspace-relative path a file-touching tool call reached, or
+   * `undefined` when the call is not one of DSH's structured filesystem tools.
+   *
+   * Shell navigation is deliberately excluded: parsing arbitrary shell syntax is
+   * not a reliable filesystem seam, which is the same boundary the shipped
+   * workspace-instruction loader draws.
+   */
+  const touchedPath = (exec: ToolExecution, workspace: string): string | undefined => {
+    if (exec.name !== 'read' && exec.name !== 'write' && exec.name !== 'edit') return undefined
+    const args = exec.arguments
+    if (typeof args !== 'object' || args === null) return undefined
+    const raw = 'file_path' in args ? (args as { readonly file_path?: unknown }).file_path : undefined
+    if (typeof raw !== 'string' || raw.trim().length === 0) return undefined
+    const absolute = isAbsolute(raw.trim()) ? resolve(raw.trim()) : resolve(workspace, raw.trim())
+    const rel = relative(resolve(workspace), absolute)
+    if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) return undefined
+    return toPosix(rel)
+  }
+
+  ctx.on('tools/result', (exec: ToolExecution, result: ToolExecutionResult): undefined => {
+    if (result.isError) return undefined
+    const agent = exec.agent
+    if (agent === undefined || exec.signal.aborted) return undefined
+    const workspace = workspaceOf(agent)
+    if (workspace === undefined) return undefined
+    const rel = touchedPath(exec, workspace)
+    if (rel === undefined) return undefined
+
+    // A skill bundle the model just wrote must reach the next catalog without a
+    // restart; the registry has no watcher of its own for this provider.
+    if (rel === SKILLS_DIR_REL || rel.startsWith(`${SKILLS_DIR_REL}/`)) invalidateSkills?.()
+
+    void (async () => {
+      const state = await rulesFor(workspace)
+      const hits = matchingRules(state.rules, rel)
+      if (hits.length === 0) return
+      let active = triggered.get(workspace)
+      if (active === undefined) {
+        active = new Set()
+        triggered.set(workspace, active)
+      }
+      for (const rule of hits) active.add(rule.rel)
+    })().catch(() => undefined)
+    return undefined
+  })
+
+  // Warm the caches for every session this scope serves, so the synchronous
+  // providers have content on the session's first turn.
   const prewarm = (agent: unknown): void => {
     const workspace = workspaceOf(agent)
     const session = sessionOf(agent)

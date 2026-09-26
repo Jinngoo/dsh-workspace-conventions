@@ -1,3 +1,9 @@
 node_modules/
 lib/
 *.tsbuildinfo
+
+# This repository is also a DSH workspace, so the workspace-memory row stores its
+# own ledger here. That is local agent state, not source. Anchored to the root so
+# the committed test fixture under tests/fixtures/ stays tracked.
+/.dsh/
+/.workbuddy/

@@ -2,12 +2,24 @@
 #
 # The row is a loose host-plane row: it publishes no service and only consumes
 # host-plane registries (`fs`, `agents`, `systemPrompt`, `sandboxPolicy`,
-# `tools`), so it must NOT be wrapped in a realm — a realm would cut it off from
-# exactly those registries. Each session resolves its own working directory at
-# call time, so this single mounted row serves every workspace without
-# cross-talk.
+# `tools`, `skills`), so it must NOT be wrapped in a realm — a realm would cut it
+# off from exactly those registries. Each session resolves its own working
+# directory at call time, so this single mounted row serves every workspace
+# without cross-talk.
+#
+# Three layers travel together:
+#   - memory  `.workbuddy/memory/` when present, else `.dsh/memory/`
+#   - rules   `.workbuddy/rules/*.md`, reproducing WorkBuddy's alwaysApply /
+#             paths semantics; the whole injected section is capped here
+#   - skills  `.workbuddy/skills/`, published as a provider on `ctx.skills` so
+#             the stock `skill` tool loads those bundles
 - insert:
     - id: workspace-memory
       name: '@jinngoo/dsh-workspace-memory'
       config:
         indexPromptBytes: 7000
+        # 常驻册优先；已触发但整册放不下的条件册降级为「标题 + 触发 + rule_read 指针」，
+        # 不会消失。这是防病态 rules 目录的护栏而非配额——册子更小时只按实际花费计。
+        rulesPromptBytes: 49152
+        # 单册上限，对齐 WorkBuddy 自己约 16 KB 的契约。
+        ruleFileBytes: 16384
