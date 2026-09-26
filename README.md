@@ -55,15 +55,17 @@ DSH 自身不认识 `.workbuddy/`：
 ## 目录结构
 
 ```
-package.json          # 包清单；dsh.bundle.patch 是「可被管理器安装的 Bundle」的入场券
+package.json          # 包清单；dsh.bundle.patch 是「可被管理器安装的 Bundle」的入场券，dsh.client 声明浏览器半边
 cordis.patch.yml      # Bundle 载荷：把 workspace-conventions 这一行插进 profile 的层栈
 tsconfig.json         # 独立严格配置（对齐 harness 的 tsconfig.base.json 开关）
-src/index.ts          # 装配层：配置、8 个工具、2 个 prompt 段落、技能 provider、触碰追踪
+index.ts              # 装配层（host 半边）：配置、8 个工具、2 个 prompt 段落、技能 provider、触碰追踪
+client/client.js      # 浏览器半边：本行的配置页（注册进插件页的 plugins.row.config 槽）
 src/memory.ts         # 记忆模型（纯逻辑）：准入、条目渲染、索引编辑、流水盘点
 src/rules.ts          # 规则册解析、分类、触发判定、段落渲染与预算
 src/skills.ts         # 技能包解析与 ctx.skills provider 工厂
+src/workspace-config.ts  # `.dsh/workspace.yml`：三层开关、记忆布局、严格报错、惰性起手模板
 src/frontmatter.ts    # 刻意收窄的 YAML frontmatter 读取器
-src/patch.ts          # 同样刻意收窄的 Cordis patch 读取器（只给下面的校验脚本用）
+src/patch.ts          # 同样刻意收窄的 Cordis patch 读取器（校验脚本与配置文件共用）
 src/glob.ts           # ** / * / ? / {a,b} 的 glob→正则编译
 src/text.ts           # 文本归一化、路径显示、字节裁剪
 src/layout.ts         # 三层共用的目录名常量
@@ -72,9 +74,20 @@ scripts/verify-workbuddy.mjs  # 对着一个真实 WorkBuddy 项目跑一遍装�
 tests/                # vitest 单测（含对真实 apply() 装配的端到端用例，以及对本仓库自身 patch 文件的断言）
 docs/DESIGN.md        # 设计文档（英文）
 docs/DESIGN.zh.md     # 设计文档中文版
+docs/workspace-config.md  # 项目级配置文件的格式规格（含供其他插件复用的约定）
 docs/verification/    # 实测证据归档（正向 / 降级 / 反向三组，含一个已修复缺陷的记录）
 docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-presets/memory/ 目录（其中保留旧包名属历史准确性）
 ```
+
+宿主入口放在包根 `index.ts`（编译到 `lib/index.js`）而不是 `src/`：这样 `exports["./client"]` 可以指向紧邻的手写 `client/client.js`，而后者不必成为 tsc 的 `rootDir` 成员。
+
+## GUI：本行的配置页
+
+装好本包后，**插件页**上 `workspace-conventions` 这一行会出现一个「配置」控件，打开即是本行的配置页（注册进 `plugins.row.config`，键为 `<包名>#<行 id>`）。它编辑的是 **profile 级**的三个字节预算，并会为被 profile 覆盖的字段标注「在此保存不会生效」。
+
+**按项目的三层开关不在这里**：`.dsh/workspace.yml` 属于项目，而 DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写它。所以本页只负责 profile 级预算，并明确写出项目开关该去哪改——不假装拥有它。
+
+改了 `package.json` 的 `dsh.client` 声明后需要**重启 dsh**：浏览器清单在启动时扫描，且"非客户端包"的判定按 Loader 说明符缓存到进程结束。
 
 ## 项目级开关（`.dsh/workspace.yml`）
 
@@ -98,34 +111,58 @@ workspace-conventions:
 
 `pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
 
-### 各开关下的实际行为
+### 开关 × 目录：一张对照表
 
-| 开关 | 提示段落 | 工具 | 是否扫描/写入 |
+先记住一条分界：**本插件的开关只管「本插件读的那些目录」**。DSH 自己还读另外几处目录，它们不受任何开关影响——最容易搞混的正是这一类，所以下表把它们一并列出并标明归属。
+
+| 目录 | 谁读 | `memory` 开关 | `rules` 开关 | `skills` 开关 |
+|---|---|---|---|---|
+| `.workbuddy/memory/` | 本插件（记忆后端①） | ✅ 控制 | —— | —— |
+| `.dsh/memory/` | 本插件（记忆后端②） | ✅ 控制 | —— | —— |
+| `.dsh/workspace.yml` | 本插件（即本档配置） | ✅ `disabled` 时三层一起停 | ✅ 同左 | ✅ 同左 |
+| `.workbuddy/rules/` | 本插件（唯一规则来源） | —— | ✅ 控制 | —— |
+| `.workbuddy/skills/` | 本插件 → 原生技能目录 | —— | —— | ✅ 控制 |
+| `.dsh/skills/` | **DSH 原生**（rank 100） | —— | —— | ❌ 不受影响，恒生效 |
+| `.agents/skills/` | **DSH 原生**（rank 200） | —— | —— | ❌ 不受影响，恒生效 |
+| `AGENTS.md` / `CLAUDE.md` | **DSH 原生**指令通道 | —— | ❌ 与本插件无关 | —— |
+| **`.dsh/rules/`** | **无人读**（见下） | —— | ❌ 与本插件无关 | —— |
+
+图例：✅ 该开关控制它；❌ 与它无关；—— 该开关不涉及这一列。
+
+**`.dsh/rules/` 是死路径。** DSH 没有"规则"机制，它唯一的工作区指令通道是 `AGENTS.md` / `CLAUDE.md`（按同目录文件名候选加载，`.local.md` 叠加）。本插件只把 `.workbuddy/rules/` 当作规则来源，**从不读 `.dsh/rules/`**。把规则册放进 `.dsh/rules/` 不会有任何效果——这是最容易踩的一处歧义。
+
+**`skills: false` 不等于"这个项目没有技能"。** 它只掐掉 `.workbuddy/skills/` → 原生技能目录这一条通道。`.dsh/skills/` 与 `.agents/skills/` 由 DSH 原生 provider 直接读取，开关管不到，也正因为这样关掉它不会影响你为 DSH 自己写的技能。
+
+### 三层的状态矩阵
+
+上一张表回答"哪里会被读"，这一张回答"各开关下**这一层本身**是什么状态"。
+
+| 开关 | 提示段落 | 工具调用 | 实际效果 |
 |---|---|---|---|
-| `memory` 缺省 | 注入索引段落 | 六个工具全部可用 | 读写都走已探测到的后端 |
+| `memory` 缺省（`enabled`） | 注入索引段落 | 六个工具全部可用 | 读写都走探测到的后端 |
 | `memory: read-only` | **不注入** | 读与诊断可用；`memory_write` / `memory_promote` 被拒并说明原因 | 只读 |
-| `memory: false` / `disabled` | 不注入 | 六个工具**全部**被拒 | 不写 |
+| `memory: false` / `disabled` | 不注入 | 六个工具**全部**被拒 | 不读不写 |
 | `rules` 缺省 | 注入常驻册，条件册按触发注入 | `rule_read` / `rule_status` 可用 | 读 `.workbuddy/rules/` |
-| `rules: false` | 不注入 | 两者都被拒 | 不读、不再记录触发 |
-| `skills` 缺省 | ——（技能不是段落） | 进原生技能目录，由标准 `skill` 工具加载 | 扫描 `.workbuddy/skills/` |
-| `skills: false` | —— | 目录里什么都没有 | **不扫描** |
+| `rules: false` | 不注入 | 两者都被拒 | 不读，也不再记录触发 |
+| `skills` 缺省 | ——（技能不是提示段落） | 由标准 `skill` 工具加载 | 扫描 `.workbuddy/skills/` 并发布 |
+| `skills: false` | —— | 那批技能在目录里不存在 | **不扫描**该目录 |
 
 三条需要解释的取舍：
 
-- **工具是进程级注册的**（`ctx.tools.register` 在加载时跑一次，那会儿还不知道任何工作区），Cordis 也无法按工作区注销。所以"关层"的等价物是**调用被拒**，且拒绝信息会指明是哪个文件里的哪个开关——而不是返回一个空结果让模型误以为"这个工作区什么都没有"。
+- **工具是进程级注册的**（`ctx.tools.register` 在加载时跑一次，那时还不知道任何工作区），Cordis 也无法按工作区注销。所以"关层"的等价物是**调用被拒**，且拒绝信息指明是哪个文件里的哪个开关——而不是返回空结果让模型误以为"这个工作区什么都没有"。
 - **只读时不注入记忆段落**：该段落承载的就是索引正文。只读工作区仍可用 `memory_read` / `memory_search` 取到同样内容，每轮再注入一遍只是重复付费。
-- **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（它带 `config` 字段），或直接看 `pnpm verify:workbuddy` 的报告开头。
+- **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（带 `config` 字段），或看 `pnpm verify:workbuddy` 报告的开头。
 
-### 目录探测与开关无关
+### 记忆后端的选取与开关无关
 
-记忆后端是按**目录存在与否**选定的，与上面的开关相互独立：
+后端是按**目录存在与否**选定的，与开关相互独立：
 
 | 项目里有什么 | 生效后端（`memory_status` 的 `mode`） |
 |---|---|
 | `.workbuddy/memory/` | `workbuddy`（兼容模式，按 WorkBuddy 原生准则注入写入准则） |
 | 只有 `.dsh/memory/`，或两者都没有 | `dsh-default`（默认模式） |
 
-上述优先级同样适用于 `.workbuddy/rules/`（规则只认这一处）。`memory` 开关只决定**是否使用**探测到的后端，不改变探测结果。
+`memory` 开关只决定**是否使用**探测到的后端，不改变探测结果。同一条"存在即优先"的分界也适用于 `.workbuddy/skills/`（对 `.dsh/skills/` 无影响，见上表）。
 
 ## 构建与测试
 

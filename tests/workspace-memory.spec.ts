@@ -16,7 +16,7 @@ import {
   scanLedgers,
   toPosix,
   upsertIndexEntry,
-} from '../src/index.ts'
+} from '../index.ts'
 
 describe('admission', () => {
   it('rejects empty and too-short entries', () => {

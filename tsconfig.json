@@ -5,7 +5,10 @@
     "moduleResolution": "bundler",
     "lib": ["es2024"],
     "outDir": "lib",
-    "rootDir": "src",
+    // The package root, not `src`: the host entry is `index.ts` at the root so
+    // that `exports["./client"]` can name a hand-written browser bundle beside it
+    // without the browser file having to be a `rootDir` member tsc would compile.
+    "rootDir": ".",
     "declaration": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -19,5 +22,5 @@
     "noUnusedParameters": true,
     "types": ["node"]
   },
-  "include": ["src"]
+  "include": ["index.ts", "src"]
 }

@@ -46,7 +46,7 @@ import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 
-import { DEFAULT_DIR, INDEX_FILE, MEMORY_SUBDIR, RULES_SUBDIR, WORKBUDDY_DIR } from './layout.js'
+import { DEFAULT_DIR, INDEX_FILE, MEMORY_SUBDIR, RULES_SUBDIR, WORKBUDDY_DIR } from './src/layout.js'
 import {
   ENTRY_KINDS,
   HARD_RULES,
@@ -60,7 +60,7 @@ import {
   type HostDirScan,
   type LedgerFile,
   type LedgerLayout,
-} from './memory.js'
+} from './src/memory.js'
 import {
   RULES_DIR_REL,
   RULE_FILE_BYTES,
@@ -68,13 +68,13 @@ import {
   parseRule,
   renderRulesSection,
   type RuleDefinition,
-} from './rules.js'
+} from './src/rules.js'
 import {
   SKILLS_DIR_REL,
   createWorkbuddySkillProvider,
   type SkillStoreReader,
-} from './skills.js'
-import { dateStamp, normalizeText, toPosix } from './text.js'
+} from './src/skills.js'
+import { dateStamp, normalizeText, toPosix } from './src/text.js'
 import {
   CONFIG_SECTION,
   DEFAULT_LAYERS,
@@ -83,7 +83,7 @@ import {
   isMemoryWritable,
   readWorkspaceConfig,
   type ParsedWorkspaceConfig,
-} from './workspace-config.js'
+} from './src/workspace-config.js'
 
 export const name = 'workspace-conventions'
 
@@ -115,15 +115,15 @@ export {
   toPosix,
   upsertIndexEntry,
 }
-export { detectSectionLevel, parseIndexDocument } from './memory.js'
-export { parseFrontmatter, readFrontmatterBoolean } from './frontmatter.js'
-export { expandBraces, matchGlob } from './glob.js'
-export { matchingRules, parseRule, renderRulesSection } from './rules.js'
-export { parseSkill } from './skills.js'
-export type { EntryKind, EntryVerdict, LedgerEntry, LedgerLayout, LedgerScan } from './memory.js'
-export type { Frontmatter, BooleanRead } from './frontmatter.js'
-export type { RuleDefinition } from './rules.js'
-export type { WorkbuddySkill } from './skills.js'
+export { detectSectionLevel, parseIndexDocument } from './src/memory.js'
+export { parseFrontmatter, readFrontmatterBoolean } from './src/frontmatter.js'
+export { expandBraces, matchGlob } from './src/glob.js'
+export { matchingRules, parseRule, renderRulesSection } from './src/rules.js'
+export { parseSkill } from './src/skills.js'
+export type { EntryKind, EntryVerdict, LedgerEntry, LedgerLayout, LedgerScan } from './src/memory.js'
+export type { Frontmatter, BooleanRead } from './src/frontmatter.js'
+export type { RuleDefinition } from './src/rules.js'
+export type { WorkbuddySkill } from './src/skills.js'
 
 /** Plugin config: how much of each store is injected each turn, and per-book caps. */
 export interface Config {
