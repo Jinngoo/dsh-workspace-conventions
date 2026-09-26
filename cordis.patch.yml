@@ -1,0 +1,13 @@
+# dsh bundle patch: inserts the workspace-memory row into a profile's layer stack.
+#
+# The row is a loose host-plane row: it publishes no service and only consumes
+# host-plane registries (`fs`, `agents`, `systemPrompt`, `sandboxPolicy`,
+# `tools`), so it must NOT be wrapped in a realm — a realm would cut it off from
+# exactly those registries. Each session resolves its own working directory at
+# call time, so this single mounted row serves every workspace without
+# cross-talk.
+- insert:
+    - id: workspace-memory
+      name: '@jinngoo/dsh-workspace-memory'
+      config:
+        indexPromptBytes: 7000
