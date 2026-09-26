@@ -300,9 +300,15 @@ const LEDGER_FILE_RE = /^\d{4}-\d{2}-\d{2}\.md$/
  * @param root - the store directory's own children.
  * @param subdirs - one scan per subdirectory of the store directory.
  * @param host - this computer's name, as the OS reports it.
+ * @param preferred - the configured layout, or `auto` to keep what the store uses.
  * @returns the inventory plus the write-target decision.
  */
-export function scanLedgers(root: readonly DirEntry[], subdirs: readonly HostDirScan[], host: string): LedgerScan {
+export function scanLedgers(
+  root: readonly DirEntry[],
+  subdirs: readonly HostDirScan[],
+  host: string,
+  preferred: 'auto' | 'flat' | 'host' = 'auto',
+): LedgerScan {
   const ledgers: LedgerFile[] = []
   for (const entry of root) {
     if (entry.type === 'file' && LEDGER_FILE_RE.test(entry.name)) {
@@ -319,10 +325,16 @@ export function scanLedgers(root: readonly DirEntry[], subdirs: readonly HostDir
     ?? subdirs.find((d) => d.name.toLowerCase() === host.toLowerCase())
   const perComputer = ledgers.some((f) => f.host !== '') || named !== undefined
   ledgers.sort((a, b) => b.date.localeCompare(a.date) || a.rel.localeCompare(b.rel))
+
+  // A configured layout decides where the *next* ledger goes; it never moves or
+  // hides one that is already there, and `auto` keeps the store's own answer.
+  const layout = preferred === 'auto' ? (perComputer ? 'host' : 'flat') : preferred
   return {
     ledgers,
-    layout: perComputer ? 'host' : 'flat',
-    hostDir: named?.name ?? (perComputer ? host : ''),
+    layout,
+    // Under `host`, an existing directory for this machine wins so a differently
+    // cased spelling keeps being used; otherwise the name is the OS's own.
+    hostDir: layout === 'flat' ? '' : named?.name ?? host,
   }
 }
 

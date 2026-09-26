@@ -83,17 +83,20 @@ docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-pr
 ```yaml
 # <项目>/.dsh/workspace.yml
 workspace-conventions:
-  memory: read-only     # true/enabled（默认）| read-only | false/disabled
+  memory: read-only     # enabled（默认）| read-only | disabled
   rules: false
   skills: false
+  memoryLayout: host    # auto（默认）| flat | host —— 新流水写到哪里
 ```
+
+文件**不存在时会被自动创建**成一份全部注释掉的起手模板（不改变任何行为，只为可发现、可编辑）；已存在的文件永不覆盖。
 
 - `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常——只读不等于失明。
 - 未知键或类型不对会**报错并停用三层**：只报错却照跑默认值，等于让那个开关静默失效。
-- 文件缺失 = 三层全开，未配置的项目行为完全不变。
-- 格式、错误语义、缓存与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
+- `memoryLayout` 只决定新流水写到哪里，不搬动也不隐藏已有流水。
+- 格式、错误语义、自动创建与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
 
-`pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。
+`pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
 
 ### 各开关下的实际行为
 

@@ -317,9 +317,9 @@ describe('project-level layer switches', () => {
     await configured(harnessed, 'rule_status')
 
     const status = await harnessed.tools.find((tool) => tool.name === 'rule_status')?.execute({}) as {
-      config: { layers: { memory: string, rules: boolean, skills: boolean } }
+      config: { layers: { memory: string, rules: boolean, skills: boolean, memoryLayout: string } }
     }
-    expect(status.config.layers).toEqual({ memory: 'enabled', rules: true, skills: true })
+    expect(status.config.layers).toEqual({ memory: 'enabled', rules: true, skills: true, memoryLayout: 'auto' })
   })
 
   it('memory read-only: no section, writes refused, reads still served', async () => {

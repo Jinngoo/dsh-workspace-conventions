@@ -22,7 +22,7 @@
 // Exit status is non-zero when a triggered book is neither injected nor reachable
 // by name, or when the section exceeds its budget.
 import { existsSync } from 'node:fs'
-import { readFile, readdir, stat as statFile } from 'node:fs/promises'
+import { readFile, readdir, stat as statFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 // The row lives in the built output, and `lib/` is not committed, so a fresh
@@ -43,15 +43,16 @@ const BUNDLE_PATCH = 'cordis.patch.yml'
 const argv = process.argv.slice(2)
 const workspace = argv[0]
 if (workspace === undefined || workspace.startsWith('--')) {
-  console.error('usage: node scripts/verify-workbuddy.mjs <workspace> [rulesPromptBytes | --profile [--profile-dir <dir>]]')
+  console.error('usage: node scripts/verify-workbuddy.mjs <workspace> [rulesPromptBytes | --profile [--profile-dir <dir>]] [--seed]')
   process.exit(2)
 }
 
-const flags = { profile: false, profileDir: defaultProfileDir() }
+const flags = { profile: false, profileDir: defaultProfileDir(), seed: false }
 const positional = []
 for (let at = 1; at < argv.length; at += 1) {
   const flag = argv[at]
   if (flag === '--profile') flags.profile = true
+  else if (flag === '--seed') flags.seed = true
   else if (flag === '--profile-dir') {
     at += 1
     const value = argv[at]
@@ -65,6 +66,12 @@ for (let at = 1; at < argv.length; at += 1) {
     process.exit(2)
   } else positional.push(flag)
 }
+
+// This probe is an inspection: it must not write into the workspace it inspects.
+// The row seeds `.dsh/workspace.yml` in a live session, so seeding is turned off
+// here unless `--seed` asks for it explicitly, which is how the write path itself
+// gets exercised.
+if (!flags.seed) process.env['DSH_SEED_WORKSPACE_CONFIG'] = '0'
 
 const requested = positional[0] === undefined ? undefined : Number(positional[0])
 if (requested !== undefined && !Number.isFinite(requested)) {
@@ -93,6 +100,9 @@ const ctx = {
       } catch { return undefined }
     },
     readText: async (target) => await readFile(target.path, 'utf8'),
+    // Only reached with `--seed`: the row seeds `.dsh/workspace.yml` in a live
+    // session, and this probe must not write into a directory it inspects.
+    writeText: async (target, content) => { await writeFile(target.path, content, 'utf8') },
     listDir: async (target) => (await readdir(target.path, { withFileTypes: true }))
       .map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other' })),
   },

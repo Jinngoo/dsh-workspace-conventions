@@ -204,6 +204,39 @@ describe('ledger layout', () => {
     expect(scan.hostDir).toBe('DevPC')
   })
 
+  describe('a configured preference overrides the detected layout', () => {
+    const flatStore = () => scanLedgers([{ name: '2026-09-24.md', type: 'file' }], [], 'DevPC')
+
+    it('forces per-computer writes on a flat store', () => {
+      const scan = scanLedgers([{ name: '2026-09-24.md', type: 'file' }], [], 'DevPC', 'host')
+
+      expect(scan.layout).toBe('host')
+      expect(scan.hostDir).toBe('DevPC')
+      expect(ledgerWritePath(scan, '2026-09-25')).toBe('DevPC/2026-09-25.md')
+      // The existing flat ledger is still inventoried, not hidden by the switch.
+      expect(scan.ledgers.map((f) => f.rel)).toEqual(['2026-09-24.md'])
+    })
+
+    it('forces flat writes on a per-computer store', () => {
+      const scan = scanLedgers(
+        [],
+        [{ name: 'DevPC', entries: [{ name: '2026-09-24.md', type: 'file' }] }],
+        'DevPC',
+        'flat',
+      )
+
+      expect(scan.layout).toBe('flat')
+      expect(scan.hostDir).toBe('')
+      expect(ledgerWritePath(scan, '2026-09-25')).toBe('2026-09-25.md')
+      expect(scan.ledgers.map((f) => f.rel)).toEqual(['DevPC/2026-09-24.md'])
+    })
+
+    it('keeps the store own layout under auto', () => {
+      expect(flatStore().layout).toBe('flat')
+      expect(scanLedgers([], [{ name: 'DevPC', entries: [] }], 'DevPC', 'auto').layout).toBe('host')
+    })
+  })
+
   it('reads this machine own ledger before the store root', () => {
     const scan = scanLedgers(
       [{ name: '2026-09-24.md', type: 'file' }],

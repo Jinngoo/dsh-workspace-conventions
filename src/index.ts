@@ -79,6 +79,7 @@ import {
   CONFIG_SECTION,
   DEFAULT_LAYERS,
   WORKSPACE_CONFIG_REL,
+  ensureWorkspaceConfig,
   isMemoryWritable,
   readWorkspaceConfig,
   type ParsedWorkspaceConfig,
@@ -298,7 +299,7 @@ export function apply(ctx: Context, config: Config): void {
           .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('.'))
           .map(async (entry): Promise<HostDirScan> => ({ name: entry.name, entries: await listAt(join(dir, entry.name)) })),
       )
-      const scan = scanLedgers(root, subdirs, host)
+      const scan = scanLedgers(root, subdirs, host, configCache.get(workspace)?.config.layers.memoryLayout ?? DEFAULT_LAYERS.memoryLayout)
       const indexText = exists ? await readAt(index) : undefined
       const indexInfo = indexText === undefined ? undefined : await statAt(index)
       return {
@@ -367,7 +368,9 @@ export function apply(ctx: Context, config: Config): void {
     if (workspace === undefined) return
     void loadState(workspace).catch(() => undefined)
     void loadRules(workspace).catch(() => undefined)
-    void loadConfig(workspace).catch(() => undefined)
+    // `configFor`, not `loadConfig`: this is the live provider path, so it is the
+    // one that seeds a missing starter file and revalidates a changed one.
+    void configFor(workspace).catch(() => undefined)
   }
 
   const stateFor = async (workspace: string): Promise<WorkspaceMemoryState> =>
@@ -387,22 +390,66 @@ export function apply(ctx: Context, config: Config): void {
    * cache that is never revalidated would freeze the answer from the moment the
    * row loaded: a config file added a second later would never take effect.
    */
+  /** How the configuration file is read, for both the live path and the verifiers. */
+  const configReader = {
+    stat: async (path: string) => (await statAt(path))?.type === 'file',
+    read: readAt,
+    mkdir: async (path: string) => {
+      const { mkdir } = await import('node:fs/promises')
+      await mkdir(path, { recursive: true })
+    },
+  }
+
+  /** Whether this process writes the starter configuration file into workspaces. */
+  const seedsConfig = (): boolean => process.env['DSH_SEED_WORKSPACE_CONFIG'] !== '0'
+
   const loadConfig = async (workspace: string): Promise<ParsedWorkspaceConfig> => {
-    // Stamp the file *before* reading it. The synchronous prompt providers call
-    // this in the background, so a read that started before an edit can finish
-    // after it; taking the stamp last would record the new file against the old
-    // contents and make that stale snapshot look current. Stamped first, the
-    // entry disagrees with the next revalidation and is simply reloaded.
-    const stamp = await configStamp(workspace)
-    const config = await readWorkspaceConfig({
-      stat: async (path) => (await statAt(path))?.type === 'file',
-      read: readAt,
-    }, workspace)
-    configCache.set(workspace, { config, stamp })
+    const config = await readWorkspaceConfig(configReader, workspace)
+    // The stamp goes on *after* the file exists, so the entry describes the file
+    // that was actually read; a later edit moves the mtime and revalidates.
+    configCache.set(workspace, { config, stamp: await configStamp(workspace) })
     if (config.issues.length > 0) {
       ctx.logger.warn(`${WORKSPACE_CONFIG_REL} in ${toPosix(workspace)}: ${config.issues.map((issue) => issue.message).join('; ')}`)
     }
     return config
+  }
+
+  /**
+   * Seed the starter file when the workspace has none, then read the switches.
+   *
+   * Seeding is deliberately its own call rather than a hidden step of reading the
+   * configuration: a read happens for every probe and every verifier, and those
+   * must not write into a directory they are merely inspecting. Only the live
+   * provider path takes this route.
+   */
+  /**
+   * Seed the starter file when the workspace has none, then read the switches.
+   *
+   * Seeding is deliberately its own call rather than a hidden step of reading the
+   * configuration: a read happens for every probe and every verifier, and those
+   * must not write into a directory they are merely inspecting. Only the live
+   * provider path takes this route, and `DSH_SEED_WORKSPACE_CONFIG=0` turns even
+   * that off.
+   */
+  const loadConfigSeeding = async (workspace: string): Promise<ParsedWorkspaceConfig> => {
+    // A filesystem that cannot write is not an error: the defaults are exactly
+    // what the absent file meant.
+    if (typeof (fs as { writeText?: unknown }).writeText === 'function') {
+      const seeded = await ensureWorkspaceConfig(configReader, async (path, text) => {
+        await writeAt(path, text, currentSession())
+      }, workspace, (message) => {
+        ctx.logger.warn(`could not create ${WORKSPACE_CONFIG_REL} in ${toPosix(workspace)}: ${message}`)
+      })
+
+      if (seeded.created) {
+        const config = await loadConfig(workspace)
+        const withFlag = { ...config, created: true }
+        configCache.set(workspace, { config: withFlag, stamp: await configStamp(workspace) })
+        return withFlag
+      }
+    }
+
+    return await loadConfig(workspace)
   }
 
   /**
@@ -427,10 +474,11 @@ export function apply(ctx: Context, config: Config): void {
    * as "use the defaults" — the same warm-up turn the other caches already have.
    */
   const configFor = async (workspace: string): Promise<ParsedWorkspaceConfig> => {
+    const load = seedsConfig() ? loadConfigSeeding : loadConfig
     const cached = configCache.get(workspace)
-    if (cached === undefined) return await loadConfig(workspace)
+    if (cached === undefined) return await load(workspace)
 
-    if (await configStamp(workspace) !== cached.stamp) return await loadConfig(workspace)
+    if (await configStamp(workspace) !== cached.stamp) return await load(workspace)
     return cached.config
   }
 
@@ -499,14 +547,17 @@ export function apply(ctx: Context, config: Config): void {
       exists: config.exists,
       layers: config.layers,
       ...config.issues.length > 0 ? { issues: config.issues.map((issue) => (issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message)) } : {},
-      note: config.exists
-        ? '项目级开关来自该文件；未出现的字段取默认（启用）'
-        : '无项目级配置文件，三层全部启用',
+      note: config.created === true
+        ? `工作区原本没有该文件，已写入一份**全部注释掉**的起手模板（不改变任何行为，仅供编辑）`
+        : config.exists
+          ? '项目级开关来自该文件；未出现的字段取默认（启用）'
+          : '无项目级配置文件，三层全部启用',
     } as unknown as JsonValue
   }
 
   /** Render the memory prompt section from a cached snapshot. Total: it never throws. */
   const renderPrompt = (workspace: string, state: WorkspaceMemoryState): string => {
+    const layoutPreference = cachedConfig(workspace)?.layers.memoryLayout ?? DEFAULT_LAYERS.memoryLayout
     const criteria = state.compat
       ? [
           '- MEMORY.md 只是索引与偏好：设计细节、模块现状、实机踩坑、环境限制一律查文档，不在索引里复述；冲突以文档为准。',
@@ -522,8 +573,7 @@ export function apply(ctx: Context, config: Config): void {
           '- 宁缺毋滥。',
         ]
 
-    const lines = [
-      state.compat
+    const lines = [      state.compat
         ? '# 工作区记忆（已检测到 WorkBuddy 体系，按原生准则兼容）'
         : '# 工作区记忆（无既有记忆体系，使用 DSH 默认规则）',
       '',
@@ -535,7 +585,7 @@ export function apply(ctx: Context, config: Config): void {
         ? state.ledgers.slice(0, 3).map((f) => f.rel).join(', ')
           + (state.ledgers.length > 3 ? ` 等共 ${String(state.ledgers.length)} 个` : '')
         : '无'}`,
-      `- 流水布局：${state.layout === 'host' ? `按计算机名分目录（本机 ${state.host}）` : '平铺在记忆目录下'}`,
+      `- 流水布局：${state.layout === 'host' ? `按计算机名分目录（本机 ${state.host}）` : '平铺在记忆目录下'}${layoutPreference === 'auto' ? '' : '（由项目配置指定，未自动沿用目录已有布局）'}`,
       '- 工具：memory_status / memory_read / memory_search / memory_write / memory_promote / memory_help',
       '',
       '写入准则：',
