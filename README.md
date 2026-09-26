@@ -63,11 +63,13 @@ src/memory.ts         # 记忆模型（纯逻辑）：准入、条目渲染、�
 src/rules.ts          # 规则册解析、分类、触发判定、段落渲染与预算
 src/skills.ts         # 技能包解析与 ctx.skills provider 工厂
 src/frontmatter.ts    # 刻意收窄的 YAML frontmatter 读取器
+src/patch.ts          # 同样刻意收窄的 Cordis patch 读取器（只给下面的校验脚本用）
 src/glob.ts           # ** / * / ? / {a,b} 的 glob→正则编译
 src/text.ts           # 文本归一化、路径显示、字节裁剪
 src/layout.ts         # 三层共用的目录名常量
+scripts/verify-profile.mjs    # 校验 profile 的覆盖补丁真的命中了本包的行 id（见下）
 scripts/verify-workbuddy.mjs  # 对着一个真实 WorkBuddy 项目跑一遍装配层，不重启 DSH 也能验证
-tests/                # vitest 单测（95 项，含对真实 apply() 装配的端到端用例）
+tests/                # vitest 单测（含对真实 apply() 装配的端到端用例，以及对本仓库自身 patch 文件的断言）
 docs/DESIGN.md        # 设计文档（英文）
 docs/DESIGN.zh.md     # 设计文档中文版
 docs/verification/    # 实测证据归档（正向 / 降级 / 反向三组，含一个已修复缺陷的记录）
@@ -79,23 +81,39 @@ docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-pr
 ```powershell
 pnpm install
 pnpm build      # tsc -p tsconfig.json -> lib/*.js + lib/*.d.ts
-pnpm test       # 95 passed
+pnpm test       # vitest run
 pnpm typecheck  # tsc --noEmit
 ```
 
 `lib/` 不入库（见 `.gitignore`），但**必须构建后才会被加载**——DSH 按 `main`/`exports` 加载。
 
-## 对着真实项目验证
+## 校验 profile 覆盖真的命中了
 
-无需重启 DSH，直接拿一个已有 `.workbuddy/` 的项目跑一遍装配层。第二个参数是 `rulesPromptBytes`，用来压出预算降级形态：
+profile 用 `id` 定址来覆盖本包的行（见 `cordis.patch.yml` 与 profile 里的同名条目）。**行 id 一旦对不上，loader 只会警告并跳过该覆盖**，插件静默回落到本 bundle 自带的默认值——typecheck、单测、装配层直测都不会报错，因为它们都不读 profile。
 
 ```powershell
-pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program"          # 默认 49152
-pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 32768    # 生产配置
-pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 20000    # 压出降级形态
+pnpm build
+pnpm verify:profile
 ```
 
-它会报告该工作区各层的实际贡献（记忆后端、每册规则的分类与注入字节数、全部技能候选），逐个触碰每册条件册的触发 glob，并把每册判为 `FULL` / `PTR` / `NAME` / `LOST`——`LOST` 表示该册在所有位置都没被点名，出现即失败；同时报告实测注入字节数是否超预算。
+它按 loader 的两步（先取 bundle 插入行的 `config` 作基线，再用同 `id` 的 profile 条目**整体替换**）解出本机真正生效的配置，并与期望值比对；期望值默认 `rulesPromptBytes=32768`，可用 `--expect rulesPromptBytes=<n>` 覆盖，也可用 `--profile-dir <dir>` 指定别的 profile。id 漂移、profile 缺失、期望不符都会非零退出并指明原因。
+
+## 对着真实项目验证
+
+无需重启 DSH，直接拿一个已有 `.workbuddy/` 的项目跑一遍装配层：
+
+```powershell
+# 显式预算：用来压出降级形态，唯一能给「磁盘上并非当前配置」的预算做体检的方式
+pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 32768
+pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 20000
+
+# 用本机 profile 真正生效的预算（缺省 49152 只在 --profile 之外出现）
+pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" --profile
+```
+
+不传预算时默认 49152（bundle 基线）；`--profile` 则从 bundle patch + profile patch 解出本机实际预算再跑，因此它在报告里给出的结论对应你真正运行的那份配置。
+
+它会报告该工作区各层的实际贡献（记忆后端、每册规则的分类与注入字节数、全部技能候选），逐个触碰每册条件册的触发 glob，并把每册判为 `FULL` / `PTR` / `NAME` / `LOST`。触发用的样本路径由 `src/glob.ts` 的同一个匹配器反向校验，globs 无法反推时会明确报告而不是静默跳过；`LOST`、未点名、或超预算都会让脚本**非零退出**。
 
 改动规则渲染层或预算准入后，请用同一命令与 [docs/verification/](docs/verification/) 里归档的形态对照。
 

@@ -117,15 +117,21 @@ Base directory for this skill: D:\Work\GameCatStudio\Escort\program\.workbuddy\s
 
 ```powershell
 # 装配层直测：不重启 DSH，对着真实项目跑一遍三层
-pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program"          # 默认 49152
-pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 32768    # 生产配置
+pnpm build                                                            # 脚本加载 lib/，改完 src 先构建
+pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 32768    # 显式预算（当时的生产配置）
 pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" 20000    # 压出降级形态
+pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" --profile # 用本机 profile 生效的预算
+
+# profile 覆盖是否真的命中了本包的行 id（id 漂移会让覆盖被静默跳过）
+pnpm verify:profile
 
 # 单测（含上述预算回归）
 pnpm test
 ```
 
-脚本报告每册的 `FULL` / `PTR` / `NAME` / `LOST` 与实测注入字节数，其中 `LOST` 表示该册在所有位置都没被点名——出现即失败。
+不传预算时为 bundle 基线 49152；`--profile` 从 bundle patch + profile patch 解出本机实际预算，因此报告对应真正运行的配置。
+
+脚本报告每册的 `FULL` / `PTR` / `NAME` / `LOST` 与实测注入字节数，其中 `LOST` 表示该册在所有位置都没被点名。触发用的样本路径会按 `src/glob.ts` 的同一匹配器反向校验——globs 无法反推某册时脚本明确报告该册未被触碰，而不是静默跳过。`LOST`、未点名或超预算都会让脚本非零退出。
 
 ## 未覆盖的边界
 
