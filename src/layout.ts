@@ -5,7 +5,7 @@
  * keeps its own default memory under `.dsh/`. Naming every directory once keeps
  * the layers from drifting apart when a store's shape is probed or written.
  *
- * @module @jinngoo/dsh-workspace-memory/layout
+ * @module @jinngoo/dsh-workspace-conventions/layout
  */
 
 /** Directory name of the WorkBuddy-compatible store root. */

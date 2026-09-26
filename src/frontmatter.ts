@@ -9,7 +9,7 @@
  * at, because silently mis-reading somebody else's rule is worse than ignoring
  * a key this reader does not model.
  *
- * @module @jinngoo/dsh-workspace-memory/frontmatter
+ * @module @jinngoo/dsh-workspace-conventions/frontmatter
  */
 
 /** One parsed frontmatter value: a scalar or a list of scalars. */

@@ -3,13 +3,13 @@ description: "可组合的工作区约定行：按工作区持久化记忆，并
 kind: "package-reference"
 ---
 
-# @jinngoo/dsh-workspace-memory
+# @jinngoo/dsh-workspace-conventions
 
 [English](DESIGN.md) | 中文
 
 ## 概述
 
-`dsh-workspace-memory` 让 agent 在它正在工作的那个工作区里拥有持久记忆、行为规则与可复用技能。preset 只需挂载这一行，加入该作用域的每个会话都读写**自己**工作目录下的内容，因此换工作区就换全部约定，无需任何配置。
+`dsh-workspace-conventions` 让 agent 在它正在工作的那个工作区里拥有持久记忆、行为规则与可复用技能。挂载作用域只需挂载这一行，其下每个会话都读写**自己**工作目录下的内容，因此换工作区就换全部约定，无需任何配置。
 
 三层都遵循同一条原则：**工作区已经存在 WorkBuddy 体系时，按那个体系的原生形态与语义工作；否则退到 DSH 的默认位置与同一套模型。** 之所以必须这样做，是因为 DSH 自身不认识 `.workbuddy/`：
 
@@ -38,13 +38,13 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-在 preset 组合中挂载本行，即可让该 preset 的会话获得工作区记忆、规则与技能。它需要 agent 作用域：它注册的每个工具都在调用时解析发起会话的工作目录，prompt 段落注册在挂载上下文的作用域内。
+在 profile 里挂载本行（本包自带的 cordis patch 就是插在 profile 的层栈上），即可让该 profile 的会话获得工作区记忆、规则与技能。它需要 agent 作用域：它注册的每个工具都在调用时解析发起会话的工作目录，prompt 段落注册在挂载上下文的作用域内。把同一行挂在某个 preset 里也是合法的——那样生效范围就收窄到该 preset 的会话。
 
 ### 配置
 
 ```yaml
-- id: workspace-memory
-  name: '@jinngoo/dsh-workspace-memory'
+- id: workspace-conventions
+  name: '@jinngoo/dsh-workspace-conventions'
   config:
     indexPromptBytes: 7000
     rulesPromptBytes: 49152
@@ -253,9 +253,11 @@ WorkBuddy 的日期流水有两种真实布局：平铺在记忆目录下（`mem
 <details>
 <summary>维护者背景信息 —— 点击展开</summary>
 
-`@jinngoo/dsh-workspace-memory` 作为挂载它的 preset 的依赖发布。它只消费 host 平面服务，因此**不得**包裹在 `isolate` realm 中：它需要的每一项能力——文件系统、agent 注册表、prompt 注册表、沙箱策略——都不属于某个单独会话。
+`@jinngoo/dsh-workspace-conventions` 作为挂载它的 profile 的依赖发布。它只消费 host 平面服务，因此**不得**包裹在 `isolate` realm 中：它需要的每一项能力——文件系统、agent 注册表、prompt 注册表、沙箱策略——都不属于某个单独会话。
 
 `inject` 列表列出了全部六个服务，因此缺少任一项的组合会在挂载时直接报错，而不是静默地什么都不贡献。`skills` 之所以是硬依赖而不是可选依赖，是因为本项目遵循同一个取舍：DSH 的 web profile 里 `skill` 注册表恒在 host 平面（被禁用的只有各 preset 自己挂载的 `skill-filesystem` 行），缺注册表的组合本来就用不了技能，静默降级只会掩盖配置错误。
+
+**命名分工是刻意的**：包名与 loader 行 id（`workspace-conventions`）命名**能力范围**，因此它们必须覆盖三层；而两个 prompt 段落仍叫 `workspace-rules` 与 `workspace-memory`，因为它们命名的是**自己的内容**——一个是规则段落，一个是记忆段落。同样地，`docs/legacy-preset/` 里保留旧包名是历史准确性，不是遗漏。改动命名时请维持这条分工，不要为了「grep 干净」把段落也改成前缀形式。
 
 源码分工：
 

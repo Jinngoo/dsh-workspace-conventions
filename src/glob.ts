@@ -8,7 +8,7 @@
  * like `client/Escort/assets/**\/*.ts` must still fire for a differently cased
  * spelling on disk.
  *
- * @module @jinngoo/dsh-workspace-memory/glob
+ * @module @jinngoo/dsh-workspace-conventions/glob
  */
 
 /**

@@ -10,7 +10,7 @@
  * turn. Admission is therefore a first-class step, and hard rejections (secrets,
  * empty or over-long entries) cannot be forced.
  *
- * @module @jinngoo/dsh-workspace-memory/memory
+ * @module @jinngoo/dsh-workspace-conventions/memory
  */
 
 import { clockStamp, normalizeText, oneLine } from './text.js'

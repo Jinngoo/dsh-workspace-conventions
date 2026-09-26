@@ -1,4 +1,4 @@
-# dsh bundle patch: inserts the workspace-memory row into a profile's layer stack.
+# dsh bundle patch: inserts the workspace-conventions row into a profile's layer stack.
 #
 # The row is a loose host-plane row: it publishes no service and only consumes
 # host-plane registries (`fs`, `agents`, `systemPrompt`, `sandboxPolicy`,
@@ -14,8 +14,8 @@
 #   - skills  `.workbuddy/skills/`, published as a provider on `ctx.skills` so
 #             the stock `skill` tool loads those bundles
 - insert:
-    - id: workspace-memory
-      name: '@jinngoo/dsh-workspace-memory'
+    - id: workspace-conventions
+      name: '@jinngoo/dsh-workspace-conventions'
       config:
         indexPromptBytes: 7000
         # 常驻册优先；已触发但整册放不下的条件册降级为「标题 + 触发 + rule_read 指针」，

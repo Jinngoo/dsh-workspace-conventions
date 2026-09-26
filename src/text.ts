@@ -1,7 +1,7 @@
 /**
  * Text, path and byte-budget helpers shared by every layer.
  *
- * @module @jinngoo/dsh-workspace-memory/text
+ * @module @jinngoo/dsh-workspace-conventions/text
  */
 
 /**

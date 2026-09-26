@@ -1,6 +1,6 @@
 {
-  "name": "@jinngoo/dsh-workspace-memory",
-  "version": "0.3.2",
+  "name": "@jinngoo/dsh-workspace-conventions",
+  "version": "0.4.0",
   "description": "DSH Bundle 形态的按工作区约定：兼容 WorkBuddy 的记忆（.workbuddy/memory，否则 .dsh/memory）、规则（.workbuddy/rules）与技能（.workbuddy/skills）",
   "license": "MIT",
   "publishConfig": {

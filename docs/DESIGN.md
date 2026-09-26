@@ -3,13 +3,13 @@ description: "The composable workspace-conventions row: per-workspace durable me
 kind: "package-reference"
 ---
 
-# @jinngoo/dsh-workspace-memory
+# @jinngoo/dsh-workspace-conventions
 
 English | [中文](DESIGN.zh.md)
 
 ## Summary
 
-`dsh-workspace-memory` gives an agent durable memory, behavioural rules and reusable skills inside the workspace it is working in. A preset mounts this row once and every session joining that scope reads and writes under **its own** working directory, so switching workspaces switches every convention with no configuration.
+`dsh-workspace-conventions` gives an agent durable memory, behavioural rules and reusable skills inside the workspace it is working in. The mounting scope mounts this row once and every session beneath it reads and writes under **its own** working directory, so switching workspaces switches every convention with no configuration.
 
 All three layers follow one principle: **when the workspace already contains a WorkBuddy system, work in that system's native shape and semantics; otherwise fall back to a DSH-default location and the same model.** The compatibility exists because DSH itself does not know `.workbuddy/`:
 
@@ -38,13 +38,13 @@ The row publishes no service — it consumes `fs`, `agents`, `systemPrompt`, `sa
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount the row inside a preset composition to give that preset's sessions workspace memory, rules and skills. It needs an agent scope: every tool it registers resolves the calling session's working directory at call time, and the prompt sections are registered in the mounting context's scope.
+Mount the row in a profile — the patch this package ships inserts it into the profile's layer stack — to give that profile's sessions workspace memory, rules and skills. It needs an agent scope: every tool it registers resolves the calling session's working directory at call time, and the prompt sections are registered in the mounting context's scope. Mounting the same row inside one preset is also valid, which narrows its effect to that preset's sessions.
 
 ### Configuration
 
 ```yaml
-- id: workspace-memory
-  name: '@jinngoo/dsh-workspace-memory'
+- id: workspace-conventions
+  name: '@jinngoo/dsh-workspace-conventions'
   config:
     indexPromptBytes: 7000
     rulesPromptBytes: 49152
@@ -253,9 +253,11 @@ These limits define when the row is a poor fit. They are current package constra
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-The pinned `@jinngoo/dsh-workspace-memory` is published as a dependency of the preset that mounts it. It consumes host-plane services only and must not be wrapped in an `isolate` realm, because none of the capabilities it needs — the filesystem, the agent registry, the prompt registry, the sandbox policy — belongs to a single session.
+The pinned `@jinngoo/dsh-workspace-conventions` is published as a dependency of the profile that mounts it. It consumes host-plane services only and must not be wrapped in an `isolate` realm, because none of the capabilities it needs — the filesystem, the agent registry, the prompt registry, the sandbox policy — belongs to a single session.
 
 The `inject` list names all six services, so a composition missing any of them fails loud at mount rather than silently contributing nothing. `skills` is a hard dependency rather than an optional one deliberately: the skill registry stays on the host plane in DSH's web profile (only each preset's own `skill-filesystem` row is disabled there), a composition without it could not use skills at all, and a silent downgrade would only hide a configuration mistake.
+
+**The naming split is deliberate.** The package name and the loader row id (`workspace-conventions`) name the *capability scope*, so they must cover all three layers; the two prompt sections stay `workspace-rules` and `workspace-memory` because they name *their own content* — one is the rules section, the other the memory section. For the same reason `docs/legacy-preset/` keeps the old package name: that is historical accuracy, not an oversight. Preserve this split when renaming; do not prefix the sections just to make greps tidy.
 
 Source map:
 

@@ -15,7 +15,7 @@
  * contract — beyond that its own loader truncates silently, so this layer
  * truncates visibly and names the tool that reads the rest.
  *
- * @module @jinngoo/dsh-workspace-memory/rules
+ * @module @jinngoo/dsh-workspace-conventions/rules
  */
 
 import { frontmatterList, parseFrontmatter, readFrontmatterBoolean } from './frontmatter.js'

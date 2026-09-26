@@ -1,4 +1,4 @@
-# dsh-workspace-memory
+# dsh-workspace-conventions
 
 工作区约定（Workspace Conventions）——一个**独立于 deepseek-harness 源码树**的 DSH Bundle 插件。
 
@@ -56,7 +56,7 @@ DSH 自身不认识 `.workbuddy/`：
 
 ```
 package.json          # 包清单；dsh.bundle.patch 是「可被管理器安装的 Bundle」的入场券
-cordis.patch.yml      # Bundle 载荷：把 workspace-memory 这一行插进 profile 的层栈
+cordis.patch.yml      # Bundle 载荷：把 workspace-conventions 这一行插进 profile 的层栈
 tsconfig.json         # 独立严格配置（对齐 harness 的 tsconfig.base.json 开关）
 src/index.ts          # 装配层：配置、8 个工具、2 个 prompt 段落、技能 provider、触碰追踪
 src/memory.ts         # 记忆模型（纯逻辑）：准入、条目渲染、索引编辑、流水盘点
@@ -71,7 +71,7 @@ tests/                # vitest 单测（95 项，含对真实 apply() 装配的�
 docs/DESIGN.md        # 设计文档（英文）
 docs/DESIGN.zh.md     # 设计文档中文版
 docs/verification/    # 实测证据归档（正向 / 降级 / 反向三组，含一个已修复缺陷的记录）
-docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-presets/memory/ 目录
+docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-presets/memory/ 目录（其中保留旧包名属历史准确性）
 ```
 
 ## 构建与测试
@@ -109,16 +109,16 @@ dsh plugin --profile web add <本仓库所在目录的绝对路径>
 
 # 2) 把包名加进 profile 的 bundle 列表（这一步决定它是否真的被当作层加载）
 #    文件：%USERPROFILE%\.dsh\profiles\web\package.json
-#      "dsh": { "profile": { "bundles": [ "...", "@jinngoo/dsh-workspace-memory" ] } }
+#      "dsh": { "profile": { "bundles": [ "...", "@jinngoo/dsh-workspace-conventions" ] } }
 #    或用 Web GUI：设置 → 插件 → 安装 Bundle（会同时完成 1 和 2）
 
 # 3) 校验组合结果里出现了这一行
-dsh --profile web --dump-config | Select-String workspace-memory
+dsh --profile web --dump-config | Select-String workspace-conventions
 
 # 4) 重启 dsh（ESM 模块在进程内缓存）
 ```
 
-发布到 registry 后就可以只写包名：`dsh plugin --profile web add @jinngoo/dsh-workspace-memory`。
+发布到 registry 后就可以只写包名：`dsh plugin --profile web add @jinngoo/dsh-workspace-conventions`。
 
 ## 开发循环
 

@@ -13,7 +13,7 @@
  * DSH wins a name collision, and it is workspace-sensitive: `list()` derives its
  * root from the lookup `cwd`, so one registered provider serves every workspace.
  *
- * @module @jinngoo/dsh-workspace-memory/skills
+ * @module @jinngoo/dsh-workspace-conventions/skills
  */
 
 import { isSkillName, type SkillCandidate, type SkillDefinition, type SkillProvider } from '@deepseek-ai/dsh-skill'

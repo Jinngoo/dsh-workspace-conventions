@@ -29,7 +29,7 @@
  *    session, the sandbox falls back to the deployment's default workspace root
  *    and denies writes inside this session's own workspace.
  *
- * @module @jinngoo/dsh-workspace-memory
+ * @module @jinngoo/dsh-workspace-conventions
  */
 
 import { hostname } from 'node:os'
@@ -76,7 +76,7 @@ import {
 } from './skills.js'
 import { dateStamp, normalizeText, toPosix } from './text.js'
 
-export const name = 'workspace-memory'
+export const name = 'workspace-conventions'
 
 /**
  * Every service this row reaches. All six are host-plane and are only consumed;
@@ -774,7 +774,7 @@ export function apply(ctx: Context, config: Config): void {
         })
       } catch { return '' }
     },
-  }), 'workspace-memory.rules')
+  }), 'workspace-conventions.rules')
 
   ctx.effect(() => prompt.context({
     name: 'workspace-memory',
@@ -794,7 +794,7 @@ export function apply(ctx: Context, config: Config): void {
         return renderPrompt(workspace, state)
       } catch { return '' }
     },
-  }), 'workspace-memory.context')
+  }), 'workspace-conventions.context')
 
   // Publish `.workbuddy/skills` through the ordinary skill registry, so the
   // stock `skill` tool loads those bundles with their relative resources.
@@ -807,7 +807,7 @@ export function apply(ctx: Context, config: Config): void {
     return createWorkbuddySkillProvider(skillReader, 'workspace-workbuddy-skills', (message) => {
       ctx.logger.warn(message)
     })
-  }), 'workspace-memory.skills')
+  }), 'workspace-conventions.skills')
 
   /**
    * The workspace-relative path a file-touching tool call reached, or

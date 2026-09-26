@@ -15,7 +15,7 @@ kind: "package-reference"
 |---|---|---|---|
 | 一 · 正向 | 既有 WorkBuddy 体系的项目，三层是否真的抵达模型 | `D:/Work/GameCatStudio/Escort/program` | 真实 DSH 会话内逐轮取证 |
 | 二 · 降级 | 预算不足时，已触发的条件册会不会消失 | 同上 | `pnpm verify:workbuddy`（装配层，不重启 DSH） |
-| 三 · 反向 | 没有 `.workbuddy/` 的工作区会不会出现任何 WorkBuddy 行为 | `D:/Work/GitHub/dsh-workspace-memory` | 真实 DSH 会话内逐轮取证 |
+| 三 · 反向 | 没有 `.workbuddy/` 的工作区会不会出现任何 WorkBuddy 行为 | `D:/Work/GitHub/dsh-workspace-conventions` | 真实 DSH 会话内逐轮取证 |
 
 环境：DSH web profile、`cordis` preset、主机 `JN_NB_HW`；插件版本见各节标注。正向与反向取证**全程只读**，未修改被测工作区内任何文件。
 
@@ -79,7 +79,7 @@ Base directory for this skill: D:\Work\GameCatStudio\Escort\program\.workbuddy\s
 
 20000 档同时验证了两件事：常驻册是整册制（放不下的 `04` 让位并被点名，而不是半注入），以及小册不会被大册碎片饿死（8128 B 的 `11` 降级，2850 B 的 `12` 仍整册）。
 
-`32768` 是生产配置（见 profile 的 `id: workspace-memory` 覆盖层），选择它的依据是上表：这是能保住最多册整册的最小值。
+`32768` 是生产配置（见 profile 的 `id: workspace-conventions` 覆盖层），选择它的依据是上表：这是能保住最多册整册的最小值。
 
 ## 证据三 · 反向（插件 0.3.1/0.3.2，两者行为一致）
 
