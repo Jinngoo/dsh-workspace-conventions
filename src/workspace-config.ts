@@ -315,36 +315,22 @@ function describe(value: PatchValue): string {
  * exist, and putting a real default value in it would silently re-implement the
  * default it replaced.
  */
-export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。
+export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。全部内容可选——本文件全注释时行为等于「三层全开」。
+# 插件各占一段，段名是该插件在组合里的行 id；本插件是 workspace-conventions。
+# 规格与复用约定：@jinngoo/dsh-workspace-conventions 的 docs/workspace-config.md
 #
-# 顶层是一个容器：\`version\`、\`layers\`，以及若干「插件段」。
-# 每个插件段以该插件在组合里的行 id 命名，各自解释自己的字段，
-# 因此两个插件不会撞名，别的插件也能复用同一个文件。
-#
-# 本插件的行 id 是 \`workspace-conventions\`。完整规格见
-# \`@jinngoo/dsh-workspace-conventions\` 的 docs/workspace-config.md。
-#
-# 全部内容可选：删掉这个文件、或只留注释，行为与「三层全开」完全一致。
+# 未知键或类型不对会让三层全部停用，并在工具里报出原因（防拼错的开关静默失效）。
 #
 # version: 1
 #
-# # 便捷段：作用于每个插件段；插件段里的同名键优先。
-# layers:
+# layers:                    # 便捷段，作用于每个插件段
 #   rules: false
 #
 # workspace-conventions:
-#   # 记忆层。read-only = 不注入记忆段落、拒绝写入与提升，读工具照常。
 #   memory: enabled          # enabled | read-only | disabled
-#   # 规则层：段落注入、条件册触发、rule_read / rule_status 一起开关。
 #   rules: true
-#   # 技能层：.workbuddy/skills 是否发布进原生技能目录；关闭则不扫描该目录。
 #   skills: true
-#   # 记忆布局：新流水写到哪里。auto = 沿用目录里已有的布局。
 #   memoryLayout: auto       # auto | flat | host
-#
-# 注意：未知键或类型不对会让**三层全部停用**，并在工具调用与
-# \`rule_status\` 里报出逐条原因——让一个拼错的开关静默失效，
-# 正是这份文件要防的事。
 `
 
 /** The outcome of making sure a workspace has a configuration file. */

@@ -1,14 +1,37 @@
 # dsh-workspace-conventions
 
-工作区约定（Workspace Conventions）——一个**独立于 deepseek-harness 源码树**的 DSH Bundle 插件。
-
-给 agent 提供**按工作区**持久化的记忆、规则与技能，并自动兼容已有的 WorkBuddy 体系：
+> 给 agent 提供**按工作区**持久化的记忆、规则与技能，并自动兼容已有的 WorkBuddy（`.workbuddy/`）体系。
+>
+> DSH Bundle 插件，独立于 deepseek-harness 源码树。
 
 | 层 | WorkBuddy 源 | DSH 回退 | 抵达模型的方式 |
 |---|---|---|---|
 | 记忆 | `.workbuddy/memory/` | `.dsh/memory/` | prompt 段落 + 6 个工具 |
 | 规则 | `.workbuddy/rules/*.md` | —（无源即不注入） | prompt 段落 + 2 个工具 |
 | 技能 | `.workbuddy/skills/` | —（无源即无候选） | 注册进 `ctx.skills` 的原生 provider |
+
+**三层可以按项目开关**（`.dsh/workspace.yml`），文件会在首次使用时自动创建：
+
+```yaml
+workspace-conventions:
+  memory: read-only     # enabled | read-only | disabled
+  rules: false
+  skills: false
+  memoryLayout: host    # auto | flat | host
+```
+
+<details>
+<summary><b>目录</b></summary>
+
+| | |
+|---|---|
+| **是什么** | [为什么需要它](#为什么需要它) · [记忆](#记忆) · [规则](#规则) · [技能](#技能) |
+| **怎么用** | [项目级开关](#项目级开关dshworkspaceyml) · [开关 × 目录](#开关--目录一张对照表) · [状态矩阵](#三层的状态矩阵) · [安装](#安装作为-bundle-装进某个-profile) |
+| **怎么验证** | [对真实项目](#对着真实项目验证) · [校验覆盖命中](#校验-profile-覆盖真的命中了) · [实测归档](docs/verification/) |
+| **怎么开发** | [构建与测试](#构建与测试) · [目录结构](#目录结构) · [开发循环](#开发循环) · [升级注意](#升级注意) · [已知限制](#已知限制当前版本) |
+| **背景细节** | [设计文档](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)） · [配置格式规格](docs/workspace-config.md) · [历史留档](docs/legacy-preset/) |
+
+</details>
 
 ## 为什么需要它
 
@@ -40,7 +63,7 @@ DSH 自身不认识 `.workbuddy/`：
 
 - 单册超过 16 KB（`ruleFileBytes`）就截断，并写明「完整内容用 `rule_read` 读」。
 - 整段超过 `rulesPromptBytes`（默认 48 KB）时**常驻册优先**，而**已触发的条件册永不出局**：整册放不下就降级为「标题 + 触发路径 + `rule_read` 指针 + 尽量多的截断正文」，连指针都放不下的册会在段落末尾的说明里被点名。
-- 准入按**实际拼装出的字符串长度**测量（含章节标题与连接符），不是估算；并且先逐个整册准入、再给剩下的发指针，每个指针都为后面的兄弟预留空间。所以既不会出现「被准入又被硬裁掉」，也不会为了塞一册大册的碎片而饿死一册小册——实测同一项目在 20 KB 预算下，8128 字节的客户端铁律降级为指针，2850 字节的错误码约定仍整册注入。
+- 准入按**实际拼装出的字符串长度**测量（含章节标题与连接符），不是估算；并且先逐个整册准入、再给剩下的发指针，每个指针都为后面的兄弟预留空间。所以既不会出现「被准入又被硬裁掉」，也不会为了塞一册大册的碎片而饿死一册小册—实测同一项目在 20 KB 预算下，8128 字节的客户端铁律降级为指针，2850 字节的错误码约定仍整册注入。
 - 触发靠 `tools/result` 追踪 `read` / `write` / `edit` 的 `file_path`。**用 shell 改文件不触发**（DSH 自带的指令加载器划的是同一条边界）；兜底是 `rule_read`，新建文件前先读同类文件同样适用。
 - frontmatter 取值读不动时**报出来，不悄悄降级**：那册不会被当成常驻册，也不会消失，而是以按需规则身份留在清单里并附一行提示。
 
@@ -48,7 +71,7 @@ DSH 自身不认识 `.workbuddy/`：
 
 `.workbuddy/skills/` 下的目录包（`<name>/SKILL.md`）与平铺文件（`<name>.md`）由注册到 `ctx.skills` 的 provider 发布，进入**原生 skill 目录**，由标准 `skill` 工具加载，相对资源（`scripts/`、`references/`）按 `resourceBase` 解析。
 
-- rank 取 **250**：低于 `project-dsh`（100）与 `project-agents`（200），高于 `custom`（300）——真正为 DSH 编写的项目技能在重名时压过 WorkBuddy 副本。
+- rank 取 **250**：低于 `project-dsh`（100）与 `project-agents`（200），高于 `custom`（300）—真正为 DSH 编写的项目技能在重名时压过 WorkBuddy 副本。
 - `disable-model-invocation` / `user-invocable` 走严格布尔语法；拼错的值**整册丢弃**并记 warn，而不是静默放行。
 - 只有模型自己的 `write` / `edit` 会同步失效 provider；**没有 watcher**。
 
@@ -80,7 +103,7 @@ docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-pr
 
 ## 项目级开关（`.dsh/workspace.yml`）
 
-三层各自可以按项目开关——profile 的一行服务所有工作区，所以"这个仓库关掉记忆"只能由项目自己的文件说。
+三层各自可以按项目开关：profile 的一行服务所有工作区，所以"这个仓库关掉记忆"只能由项目自己的文件说。
 
 ```yaml
 # <项目>/.dsh/workspace.yml
@@ -88,12 +111,12 @@ workspace-conventions:
   memory: read-only     # enabled（默认）| read-only | disabled
   rules: false
   skills: false
-  memoryLayout: host    # auto（默认）| flat | host —— 新流水写到哪里
+  memoryLayout: host    # auto（默认）| flat | host — 新流水写到哪里
 ```
 
 文件**不存在时会被自动创建**成一份全部注释掉的起手模板（不改变任何行为，只为可发现、可编辑）；已存在的文件永不覆盖。
 
-- `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常——只读不等于失明。
+- `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常，只读不等于失明。
 - 未知键或类型不对会**报错并停用三层**：只报错却照跑默认值，等于让那个开关静默失效。
 - `memoryLayout` 只决定新流水写到哪里，不搬动也不隐藏已有流水。
 - 格式、错误语义、自动创建与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
@@ -102,23 +125,23 @@ workspace-conventions:
 
 ### 开关 × 目录：一张对照表
 
-先记住一条分界：**本插件的开关只管「本插件读的那些目录」**。DSH 自己还读另外几处目录，它们不受任何开关影响——最容易搞混的正是这一类，所以下表把它们一并列出并标明归属。
+先记住一条分界：**本插件的开关只管「本插件读的那些目录」**。DSH 自己还读另外几处目录，它们不受任何开关影响。最容易搞混的正是这一类，所以下表把它们一并列出并标明归属。
 
 | 目录 | 谁读 | `memory` 开关 | `rules` 开关 | `skills` 开关 |
 |---|---|---|---|---|
-| `.workbuddy/memory/` | 本插件（记忆后端①） | ✅ 控制 | —— | —— |
-| `.dsh/memory/` | 本插件（记忆后端②） | ✅ 控制 | —— | —— |
+| `.workbuddy/memory/` | 本插件（记忆后端①） | ✅ 控制 | — | — |
+| `.dsh/memory/` | 本插件（记忆后端②） | ✅ 控制 | — | — |
 | `.dsh/workspace.yml` | 本插件（即本档配置） | ✅ `disabled` 时三层一起停 | ✅ 同左 | ✅ 同左 |
-| `.workbuddy/rules/` | 本插件（唯一规则来源） | —— | ✅ 控制 | —— |
-| `.workbuddy/skills/` | 本插件 → 原生技能目录 | —— | —— | ✅ 控制 |
-| `.dsh/skills/` | **DSH 原生**（rank 100） | —— | —— | ❌ 不受影响，恒生效 |
-| `.agents/skills/` | **DSH 原生**（rank 200） | —— | —— | ❌ 不受影响，恒生效 |
-| `AGENTS.md` / `CLAUDE.md` | **DSH 原生**指令通道 | —— | ❌ 与本插件无关 | —— |
-| **`.dsh/rules/`** | **无人读**（见下） | —— | ❌ 与本插件无关 | —— |
+| `.workbuddy/rules/` | 本插件（唯一规则来源） | — | ✅ 控制 | — |
+| `.workbuddy/skills/` | 本插件 → 原生技能目录 | — | — | ✅ 控制 |
+| `.dsh/skills/` | **DSH 原生**（rank 100） | — | — | ❌ 不受影响，恒生效 |
+| `.agents/skills/` | **DSH 原生**（rank 200） | — | — | ❌ 不受影响，恒生效 |
+| `AGENTS.md` / `CLAUDE.md` | **DSH 原生**指令通道 | — | ❌ 与本插件无关 | — |
+| **`.dsh/rules/`** | **无人读**（见下） | — | ❌ 与本插件无关 | — |
 
-图例：✅ 该开关控制它；❌ 与它无关；—— 该开关不涉及这一列。
+图例：✅ 该开关控制它；❌ 与它无关；— 该开关不涉及这一列。
 
-**`.dsh/rules/` 是死路径。** DSH 没有"规则"机制，它唯一的工作区指令通道是 `AGENTS.md` / `CLAUDE.md`（按同目录文件名候选加载，`.local.md` 叠加）。本插件只把 `.workbuddy/rules/` 当作规则来源，**从不读 `.dsh/rules/`**。把规则册放进 `.dsh/rules/` 不会有任何效果——这是最容易踩的一处歧义。
+**`.dsh/rules/` 是死路径。** DSH 没有"规则"机制，它唯一的工作区指令通道是 `AGENTS.md` / `CLAUDE.md`（按同目录文件名候选加载，`.local.md` 叠加）。本插件只把 `.workbuddy/rules/` 当作规则来源，**从不读 `.dsh/rules/`**。把规则册放进 `.dsh/rules/` 不会有任何效果—这是最容易踩的一处歧义。
 
 **`skills: false` 不等于"这个项目没有技能"。** 它只掐掉 `.workbuddy/skills/` → 原生技能目录这一条通道。`.dsh/skills/` 与 `.agents/skills/` 由 DSH 原生 provider 直接读取，开关管不到，也正因为这样关掉它不会影响你为 DSH 自己写的技能。
 
@@ -133,15 +156,15 @@ workspace-conventions:
 | `memory: false` / `disabled` | 不注入 | 六个工具**全部**被拒 | 不读不写 |
 | `rules` 缺省 | 注入常驻册，条件册按触发注入 | `rule_read` / `rule_status` 可用 | 读 `.workbuddy/rules/` |
 | `rules: false` | 不注入 | 两者都被拒 | 不读，也不再记录触发 |
-| `skills` 缺省 | ——（技能不是提示段落） | 由标准 `skill` 工具加载 | 扫描 `.workbuddy/skills/` 并发布 |
-| `skills: false` | —— | 那批技能在目录里不存在 | **不扫描**该目录 |
+| `skills` 缺省 | —（技能不是提示段落） | 由标准 `skill` 工具加载 | 扫描 `.workbuddy/skills/` 并发布 |
+| `skills: false` | — | 那批技能在目录里不存在 | **不扫描**该目录 |
 
 四条需要解释的取舍：
 
-- **工具是进程级注册的**（`ctx.tools.register` 在加载时跑一次，那时还不知道任何工作区），Cordis 也无法按工作区注销。所以"关层"的等价物是**调用被拒**，且拒绝信息指明是哪个文件里的哪个开关——而不是返回空结果让模型误以为"这个工作区什么都没有"。
+- **工具是进程级注册的**（`ctx.tools.register` 在加载时跑一次，那时还不知道任何工作区），Cordis 也无法按工作区注销。所以"关层"的等价物是**调用被拒**，且拒绝信息指明是哪个文件里的哪个开关—而不是返回空结果让模型误以为"这个工作区什么都没有"。
 - **只读时不注入记忆段落**：该段落承载的就是索引正文。只读工作区仍可用 `memory_read` / `memory_search` 取到同样内容，每轮再注入一遍只是重复付费。
 - **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（带 `config` 字段），或看 `pnpm verify:workbuddy` 报告的开头。
-- **本插件不提供 GUI**：配置来源只有两处——三层的开关在项目级 `.dsh/workspace.yml`（唯一来源），字节预算在 profile 的 `cordis.patch.yml`（每轮 token 的全局策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
+- **本插件不提供 GUI**：配置来源只有两处—三层的开关在项目级 `.dsh/workspace.yml`（唯一来源），字节预算在 profile 的 `cordis.patch.yml`（每轮 token 的全局策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
 
 ### 记忆后端的选取与开关无关
 
@@ -154,20 +177,24 @@ workspace-conventions:
 
 `memory` 开关只决定**是否使用**探测到的后端，不改变探测结果。同一条"存在即优先"的分界也适用于 `.workbuddy/skills/`（对 `.dsh/skills/` 无影响，见上表）。
 
+---
+
+# 验证与开发
+
 ## 构建与测试
 
 ```powershell
 pnpm install
-pnpm build      # tsc -p tsconfig.json -> lib/*.js + lib/*.d.ts
+pnpm build      # clean + tsc -p tsconfig.json -> lib/*.js + lib/*.d.ts
 pnpm test       # vitest run
-pnpm typecheck  # tsc --noEmit
+pnpm typecheck  # tsc -p tsconfig.json --noEmit
 ```
 
-`lib/` 不入库（见 `.gitignore`），但**必须构建后才会被加载**——DSH 按 `main`/`exports` 加载。
+`lib/` 不入库（见 `.gitignore`），但**必须构建后才会被加载**，因为 DSH 按 `main`/`exports` 加载。`build` 会先清空 `lib/`：`tsc` 不会删除输出目录里已存在的陈旧文件，而校验脚本按固定路径 import 构建产物，留着旧副本会静默加载过期代码。
 
 ## 校验 profile 覆盖真的命中了
 
-profile 用 `id` 定址来覆盖本包的行（见 `cordis.patch.yml` 与 profile 里的同名条目）。**行 id 一旦对不上，loader 只会警告并跳过该覆盖**，插件静默回落到本 bundle 自带的默认值——typecheck、单测、装配层直测都不会报错，因为它们都不读 profile。
+profile 用 `id` 定址来覆盖本包的行（见 `cordis.patch.yml` 与 profile 里的同名条目）。**行 id 一旦对不上，loader 只会警告并跳过该覆盖**，插件静默回落到本 bundle 自带的默认值，而 typecheck、单测、装配层直测都不会报错，因为它们都不读 profile。
 
 ```powershell
 pnpm build

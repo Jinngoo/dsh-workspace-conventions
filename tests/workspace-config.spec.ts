@@ -279,4 +279,17 @@ describe('seeding a workspace that has no file', () => {
     expect(config.issues).toEqual([])
     expect(config.layers).toEqual(DEFAULT_LAYERS)
   })
+
+  it('keeps the template short enough to read and entirely inert', () => {
+    const lines = WORKSPACE_CONFIG_TEMPLATE.trimEnd().split('\n')
+
+    // A starter file long enough to scroll past is one nobody reads.
+    expect(lines.length).toBeLessThanOrEqual(20)
+    // Nothing but comments, so creating the file can never change behaviour.
+    expect(lines.every((line) => line.trimStart().startsWith('#'))).toBe(true)
+    // Every switch the plugin understands is discoverable from the file itself.
+    for (const key of ['version', 'layers', 'memory', 'rules', 'skills', 'memoryLayout']) {
+      expect(WORKSPACE_CONFIG_TEMPLATE).toContain(key)
+    }
+  })
 })
