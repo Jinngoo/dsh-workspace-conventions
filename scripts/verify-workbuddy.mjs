@@ -33,9 +33,9 @@ if (!existsSync(new URL('../lib/index.js', import.meta.url))) {
   process.exit(2)
 }
 
-const { expandBraces, matchGlob } = await import('../lib/src/glob.js')
-const { defaultProfileDir, readPatchFile, resolveRow } = await import('../lib/src/patch.js')
-const { DEFAULT_LAYERS, readWorkspaceConfig } = await import('../lib/src/workspace-config.js')
+const { expandBraces, matchGlob } = await import('../lib/glob.js')
+const { defaultProfileDir, readPatchFile, resolveRow } = await import('../lib/patch.js')
+const { DEFAULT_LAYERS, readWorkspaceConfig } = await import('../lib/workspace-config.js')
 
 const ROW_ID = 'workspace-conventions'
 const BUNDLE_PATCH = 'cordis.patch.yml'

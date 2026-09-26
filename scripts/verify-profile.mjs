@@ -18,12 +18,12 @@ import { existsSync } from 'node:fs'
 // The reader lives in the built output, and `lib/` is not committed, so a fresh
 // checkout fails here before anything else — say so instead of letting the import
 // report a missing module.
-if (!existsSync(new URL('../lib/src/patch.js', import.meta.url))) {
-  console.error('lib/src/patch.js is missing: run `pnpm build` first (lib/ is not committed)')
+if (!existsSync(new URL('../lib/patch.js', import.meta.url))) {
+  console.error('lib/patch.js is missing: run `pnpm build` first (lib/ is not committed)')
   process.exit(2)
 }
 
-const { defaultProfileDir, readPatchFile, resolveRow } = await import('../lib/src/patch.js')
+const { defaultProfileDir, readPatchFile, resolveRow } = await import('../lib/patch.js')
 
 const DEFAULTS = { id: 'workspace-conventions', profileDir: defaultProfileDir() }
 const EXPECTED = new Map([['rulesPromptBytes', '32768']])

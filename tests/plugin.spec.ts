@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
-import { apply, type Config } from '../index.ts'
+import { apply, type Config } from '../src/index.ts'
 
 const WORKSPACE = fileURLToPath(new URL('./fixtures/workbuddy', import.meta.url))
 const SKILL_DIR = join(WORKSPACE, '.workbuddy', 'skills', 'fixture-skill')
