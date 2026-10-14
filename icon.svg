@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Workspace conventions">
+  <title>Workspace conventions</title>
+  <g fill="none" stroke="#247bbf" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 工作区文件夹 -->
+    <path d="M8 46 V17 A3 3 0 0 1 11 14 H22 L27 20 H52 A3 3 0 0 1 55 23 V46 A3 3 0 0 1 52 49 H11 A3 3 0 0 1 8 46 Z"/>
+    <!-- 按工作区生效的约定条目：勾 + 文本行 -->
+    <path d="M18 30 L21 33 L26 27"/>
+    <path d="M32 30 H45"/>
+    <path d="M18 40 L21 43 L26 37"/>
+    <path d="M32 40 H41"/>
+  </g>
+  <!-- 记忆 / 技能的火花 -->
+  <path d="M52 4 L53.8 8.2 L58 10 L53.8 11.8 L52 16 L50.2 11.8 L46 10 L50.2 8.2 Z" fill="#247bbf"/>
+</svg>
