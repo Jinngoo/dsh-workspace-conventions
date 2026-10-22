@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
@@ -17,6 +17,24 @@ const PROFILE_DIR = defaultProfileDir()
 const PROFILE_PATCH = PROFILE_DIR === undefined ? undefined : join(PROFILE_DIR, 'cordis.patch.yml')
 
 const ROW_ID = 'workspace-conventions'
+
+/**
+ * 本机 profile 是否真的覆盖了本行。
+ *
+ * 「profile 里有覆盖」是**机器级可选配置**，不是包的契约：默认安装（含 CI 与任何新机器）只有 bundle
+ * patch 那一份。所以下面那条断言必须在没有覆盖时跳过，而不是要求每台机器都手写一段 profile 配置。
+ * 解析失败按「无覆盖」处理——profile patch 里出现本工程不支持的方言时，这条测试不该替 patch 解析器丢脸。
+ */
+function profileOverridesRow(): boolean {
+  if (PROFILE_PATCH === undefined || !existsSync(PROFILE_PATCH)) return false
+  try {
+    return findRows(parsePatch(readFileSync(PROFILE_PATCH, 'utf8'), PROFILE_PATCH), ROW_ID).length > 0
+  } catch {
+    return false
+  }
+}
+
+const PROFILE_OVERRIDES_ROW = profileOverridesRow()
 
 describe('the supported slice of a patch file', () => {
   it('unwraps `- insert:` and keeps the nested config block', () => {
@@ -221,7 +239,7 @@ describe('the patch files this repository actually ships', () => {
     expect(() => readPatchFile(BUNDLE_PATCH)).not.toThrow()
   })
 
-  it.skipIf(PROFILE_PATCH === undefined || !existsSync(PROFILE_PATCH))(
+  it.skipIf(!PROFILE_OVERRIDES_ROW)(
     'has a profile patch that overrides the baseline for this machine',
     async () => {
       const bundle = await readPatchFile(BUNDLE_PATCH)

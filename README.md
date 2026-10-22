@@ -251,9 +251,10 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 
 ## 升级注意
 
-- dsh 升到 0.2.x 后，`peerDependencies` 里的 `^0.1.7-rc.2` 会失配，**整个 Bundle 会在启动时被静默跳过**（不会报错，只在日志里留一行）。届时把范围改到匹配的版本，或用 `dsh plugin --profile web allow-version` 授予精确版本豁免。
-- `@deepseek-ai/cordis` / `@deepseek-ai/schemastery` 不是 dsh 包，不参与兼容门禁。
-- DSH 的兼容门禁只检查 `@deepseek-ai/dsh` 与 `@deepseek-ai/dsh-*` 这些 peer，范围写 `workspace:^` 会被当作「当前运行时」（但那套协议只在 harness 工作区内可用，本工程不能用）。
+- 兼容门禁在 dsh 0.2.1-alpha.3 起**先看 `engines.dsh`**；声明了它，dsh peer 范围就不再参与判定。本包声明 `engines.dsh: ^0.2.0-rc.1`，peer 也收窄到 `^0.2.0-rc.1`（0.1.x 不再承诺：构建用的静态类型已对齐到 0.2.1-rc.2，和 0.1.x 的运行时不再保证一致）。升到 dsh 0.3 时先改这两处，或用 `dsh plugin --profile web allow-version` 授予精确版本豁免；否则**整个 Bundle 会在启动时被静默跳过**（不报错，只在日志里留一行）。
+- 门禁的 semver 判定带 `includePrerelease: true`（`packages/boot/app-boot/src/plugin-compatibility.ts`），所以 `^0.2.0-rc.1` 能接受 `0.2.1-rc.2`；但同一范围在**不带该选项**的普通 `semver.satisfies` 里会判 false——自己写校验脚本时别用默认选项，否则会得到与 DSH 相反的结论。
+- `devDependencies` 里的 `@deepseek-ai/dsh-*` 必须与**正在跑的运行时**同一个版本：它是构建时的类型来源，也是 `link:` 安装后插件自己 `node_modules` 里的运行时副本来源。两者错版时 typecheck 全绿也说明不了运行时契约。
+- `@deepseek-ai/cordis` / `@deepseek-ai/schemastery` 不是 dsh 包，不参与兼容门禁；但版本要和 harness 的 vendored 副本对齐（当前 4.0.5 / 3.18.5），否则 `Config` 会被当成非原生 schema。
 - `skills` 是**硬依赖**：DSH 的 web profile 里 skill 注册表恒在 host 平面（被禁用的只有各 preset 自己挂载的 `skill-filesystem` 行），缺注册表的组合本来就用不了技能。本行选择在挂载时直接报错，而不是静默降级。
 
 ## 已知限制（当前版本）
@@ -271,3 +272,12 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 - frontmatter 只读一个子集：扁平 `key: scalar`、块状列表、行内列表；嵌套映射、多行标量、锚点不解释。
 
 设计细节与逐层取舍见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)）。
+
+## 变更记录
+
+### 0.4.1 — 对齐 DSH 0.2.1-rc.2
+
+- **构建与运行时版本对齐**：`devDependencies` 的 8 个 `@deepseek-ai/dsh-*` 从 `0.1.7-rc.2` 升到 `0.2.1-rc.2`，`@deepseek-ai/cordis` → `^4.0.5`、`@deepseek-ai/schemastery` → `^3.18.5`。之前是拿 0.1.7 的类型构建、在 0.2.1 的运行时里跑；`link:` 安装下插件自身的 `node_modules` 就是运行时解析目标，错版会让 `Config` 识别、tool/skill 注册这些契约在"类型绿、运行时未知"的状态里。
+- **声明 `engines.dsh: ^0.2.0-rc.1`**（dsh 0.2.1-alpha.3 起先看 `engines.dsh`，声明后 peer 范围不再参与判定），peer 同步收窄到 `^0.2.0-rc.1`，去掉 0.1.x 承诺。
+- **不兼容的测试改为按机器条件跳过**：`tests/patch.spec.ts` 里那条「本机 profile 覆盖了基线」断言原本只判断 profile patch 文件**存在**就要求它有本行覆盖，因此任何没手写 profile 覆盖的机器（含 CI）都会红。现在改为解析 profile patch、确认真的含 `workspace-conventions` 行才断言。这是测试的环境依赖缺陷，不是插件行为变更。
+- 用 0.2.1-rc.2 的类型重跑 `pnpm typecheck` 无改动通过，`ctx.tools.register` / `defineTool`、`ctx.skills.registerProvider`、`ctx.systemPrompt.context`、`ctx.agents`、`ctx.sandboxPolicy.resolve`、`ctx.fs`、事件 `tools/result` 与 `agent/created` 均未发生签名漂移。

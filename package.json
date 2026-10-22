@@ -1,6 +1,6 @@
 {
   "name": "@jinngoo/dsh-workspace-conventions",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "DSH Bundle 形态的按工作区约定：兼容 WorkBuddy 的记忆（.workbuddy/memory，否则 .dsh/memory）、规则（.workbuddy/rules）与技能（.workbuddy/skills）",
   "license": "MIT",
   "repository": {
@@ -12,7 +12,8 @@
     "url": "https://gitee.com/jinngoo/dsh-workspace-conventions/issues"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22",
+    "dsh": "^0.2.0-rc.1"
   },
   "publishConfig": {
     "access": "public"
@@ -51,30 +52,30 @@
     "prepublishOnly": "pnpm typecheck && pnpm test && pnpm build"
   },
   "peerDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-agent": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-fs": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-sandbox": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-sandbox-policy": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-skill": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-system-prompt": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-tools": "^0.1.7-rc.2 || ^0.2.0-rc.1",
-    "@deepseek-ai/dsh-util-values": "^0.1.7-rc.2 || ^0.2.0-rc.1"
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-agent": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-fs": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-sandbox": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-skill": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-system-prompt": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-tools": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-util-values": "^0.2.0-rc.1"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "^3.18.4"
+    "@deepseek-ai/schemastery": "^3.18.5"
   },
   "devDependencies": {
-    "@deepseek-ai/cordis": "^4.0.4",
-    "@deepseek-ai/dsh-agent": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-fs": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-sandbox": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-sandbox-policy": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-skill": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-system-prompt": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-tools": "0.1.7-rc.2",
-    "@deepseek-ai/dsh-util-values": "0.1.7-rc.2",
-    "@deepseek-ai/schemastery": "^3.18.4",
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/dsh-agent": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-fs": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-sandbox-policy": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-skill": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-tools": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-util-values": "0.2.1-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.5",
     "@types/node": "^22.20.0",
     "typescript": "^5.9.0",
     "vitest": "^4.1.8"
