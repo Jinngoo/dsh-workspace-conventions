@@ -560,6 +560,7 @@ describe('the global scope and the self layers', () => {
       () => section(harnessed.sections, 'global-rules'),
       (value) => value.includes('所有项目都遵守这一条'),
     )
+    expect(text).toContain('全局规则（跨工作区')
     expect(text).toContain('全局约定')
 
     const read = harnessed.tools.find((tool) => tool.name === 'rule_read')

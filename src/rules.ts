@@ -126,6 +126,11 @@ export interface RulesSectionInput {
   readonly ruleFileBytes: number
   /** Total byte cap for the whole injected section. */
   readonly maxBytes: number
+  /**
+   * Banner line for the section. Defaults to the workspace heading; the global
+   * rules section passes its own so the model can tell the two scopes apart.
+   */
+  readonly title?: string
 }
 
 /**
@@ -149,7 +154,7 @@ export interface RulesSectionInput {
  * @returns the model-facing section text, or an empty string.
  */
 export function renderRulesSection(input: RulesSectionInput): string {
-  const { dir, rules, active, ruleFileBytes, maxBytes } = input
+  const { dir, rules, active, ruleFileBytes, maxBytes, title } = input
   if (rules.length === 0 || !Number.isFinite(maxBytes) || maxBytes <= 0) return ''
 
   const always = rules.filter(isAlwaysRule)
@@ -166,7 +171,7 @@ export function renderRulesSection(input: RulesSectionInput): string {
     const pick = (list: readonly RuleDefinition[]): string[] =>
       list.map((rule) => admitted.get(rule.rel)).filter((block): block is string => block !== undefined)
     const omitted = wanted.filter((rule) => !admitted.has(rule.rel)).map((rule) => rule.file)
-    const parts = [renderHeader(dir)]
+    const parts = [renderHeader(dir, title)]
     const alwaysBlocks = pick(always)
     if (alwaysBlocks.length > 0) parts.push('## 常驻册\n', ...alwaysBlocks)
     const firedBlocks = pick(fired)
@@ -259,9 +264,9 @@ export function ruleTitle(body: string, fallback: string): string {
   return fallback.replace(/\.md$/i, '')
 }
 
-function renderHeader(dir: string): string {
+function renderHeader(dir: string, title: string | undefined): string {
   return [
-    `# 工作区规则（${toPosix(dir)}/）`,
+    title ?? `# 工作区规则（${toPosix(dir)}/）`,
     '',
     '这些册子由本插件按 WorkBuddy 原生语义自动注入：常驻册每轮都在；条件册在你读或改匹配文件后自动生效。',
     '会话中修改 rules 文件不会重载，下一次会话才生效。',

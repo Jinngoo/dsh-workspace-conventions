@@ -1884,6 +1884,7 @@ export function apply(ctx: Context, config: Config): void {
           active: globalTriggered.get(workspace) ?? EMPTY_RULES,
           ruleFileBytes,
           maxBytes: globalRulesPromptBytes,
+          title: '# 全局规则（跨工作区；每个工作区都生效）',
         })
       } catch { return '' }
     },
