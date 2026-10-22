@@ -16,25 +16,37 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
   memory: read-only
   rules: true
   skills: false
+  persona: true
+  mood: true
+  inherit:                     # 是否继承全局作用域（false = 屏蔽全局）
+    persona: true
+    memory: false
 ```
 
 - 顶层是一个**块映射**：`version`、`layers`，以及若干个 **插件段**。
 - **插件段以该插件在组合里携带的行 id 命名**。这样两个插件不可能撞名，各自的段也只由自己解释。本插件的行 id 是 `workspace-conventions`（见仓库根的 `cordis.patch.yml`）。
 - 段是**可选**的：没有 `workspace-conventions` 段只表示"这个插件未被配置"，不是配错了。
-- `layers` 是给"只想全局关掉某层、不想记插件名"的场景；插件段里的同名键**覆盖**它。
+- `layers` 是给"只想全局关掉某层、不想记插件名"的场景；插件段里的同名键**覆盖**它（嵌套的 `inherit` 同样按层覆盖）。
 
 ## 本插件的键
+
+两条正交的轴：**这一层是否启用**，以及**是否继承全局作用域**。
 
 | 键 | 取值 | 含义 |
 |---|---|---|
 | `memory` | `true` / `enabled` | 默认。注入索引段落，读写工具都可用 |
 | | `read-only` | **不注入**记忆段落；写与提升被拒绝并说明原因；读工具照常 |
-| | `false` / `disabled` | 整层关闭：段落不注入，全部记忆工具被拒绝 |
-| `rules` | `true`（默认）/ `false` | 段落、条件册触发、`rule_read` / `rule_status` 一起开关 |
+| | `false` / `disabled` | 整层关闭：段落不注入，全部记忆工具被拒绝（含全局作用域路径） |
+| `rules` | `true`（默认）/ `false` | 段落、条件册触发、`rule_read` / `rule_status` 一起开关（工作区与全局两套） |
 | `skills` | `true`（默认）/ `false` | `.workbuddy/skills` 是否发布进原生技能目录；关闭时该目录**不会**被扫描 |
+| `persona` | `true`（默认）/ `false` | 人格片段是否注入；关闭时 `persona_read` / `persona_write` 被拒 |
+| `mood` | `true`（默认）/ `false` | 情绪状态是否注入；关闭时 `mood_get` / `mood_set` 被拒 |
 | `memoryLayout` | `auto`（默认） | 新流水沿用目录里已有的布局 |
 | | `flat` | 新流水写在记忆目录下（`memory/YYYY-MM-DD.md`） |
 | | `host` | 新流水写在按计算机名分的子目录里（`memory/<计算机名>/YYYY-MM-DD.md`） |
+| `inherit` | 映射 | 四个键：`persona` / `mood` / `memory` / `rules`，默认全 `true`；`false` = 屏蔽该层的全局来源 |
+
+`inherit` 的语义按层不同：人格与规则是**同名遮蔽**（工作区同名片段/册整体替换全局那份），情绪是**取最新一份**，记忆是**两段独立注入**（`inherit.memory: false` 时才消失）。屏蔽对工具同样生效：`memory_*` / `rule_read` 的 `scope="global"` 会被拒——只掐注入不掐工具，等于让开关变成装饰。
 
 `memory` 为什么只读时也不注入段落：该段落承载的就是索引正文本身。只读工作区仍可用读工具取到同样内容，每轮再注入一遍只是重复付费。
 

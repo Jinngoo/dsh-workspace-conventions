@@ -1,5 +1,5 @@
 ---
-description: "可组合的工作区约定行：按工作区持久化记忆，并在既有 WorkBuddy 体系存在时按原生语义兼容它的记忆、规则与技能，面向配置或调试 agent 工作区约定的使用者与维护者。"
+description: "可组合的双层作用域约定行：在工作区与全局（$DSH_HOME）两级提供人格、情绪、记忆、规则与技能，并在既有 WorkBuddy 体系存在时按原生语义兼容它的记忆、规则与技能，面向配置或调试 agent 工作区约定的使用者与维护者。"
 kind: "package-reference"
 ---
 
@@ -9,18 +9,21 @@ kind: "package-reference"
 
 ## 概述
 
-`dsh-workspace-conventions` 让 agent 在它正在工作的那个工作区里拥有持久记忆、行为规则与可复用技能。挂载作用域只需挂载这一行，其下每个会话都读写**自己**工作目录下的内容，因此换工作区就换全部约定，无需任何配置。
+`dsh-workspace-conventions` 让 agent 在它正在工作的那个工作区里拥有持久记忆、行为规则与可复用技能，**并把"我是谁"这一层放到跨工作区的全局作用域**。挂载作用域只需挂载这一行，其下每个会话都读写**自己**工作目录下的内容；而全局层（人格、情绪、长期记忆、跨项目规则）对所有工作区共享，每个工作区可以按层继承或屏蔽它。
 
-三层都遵循同一条原则：**工作区已经存在 WorkBuddy 体系时，按那个体系的原生形态与语义工作；否则退到 DSH 的默认位置与同一套模型。** 之所以必须这样做，是因为 DSH 自身不认识 `.workbuddy/`：
+两套作用域共用同一条原则：**工作区已经存在 WorkBuddy 体系时，按那个体系的原生形态与语义工作；否则退到 DSH 的默认位置与同一套模型。** 之所以必须这样做，是因为 DSH 自身不认识 `.workbuddy/`，也没有记忆与人格机制：
 
 - DSH 唯一的「工作区指令」通道是 `@deepseek-ai/dsh-agent-instructions`，它只按**同目录文件名候选**加载 `AGENTS.md` / `CLAUDE.md`（外加 `AGENTS.local.md` / `CLAUDE.local.md`）。候选名不得含路径分隔符，所以 `.workbuddy/rules/` 这种目录式规则**无法用配置表达**；DSH 也没有 Cursor 那样的 `alwaysApply` / `paths` / glob 规则机制。
 - DSH 的技能由 `@deepseek-ai/dsh-skill-filesystem` 扫描 `<projectRoot>/.dsh/skills`、`<projectRoot>/.agents/skills`、`customSkillDirs`、`<dshHome>/skills`、`<agentsHome>/skills`。`.workbuddy/skills/` 不在其中。
+- DSH 的全局注入只有 `$DSH_HOME/AGENTS.md` 一份静态文本；人格由 preset 的 `personaPrefix` 承载且会话首轮后锁定。"可写、可检索、会衰减"的东西 DSH 一律不提供。
 
-| 层 | WorkBuddy 源 | DSH 回退 | 抵达模型的方式 |
+| 层 | 工作区源 | 全局源（跨工作区） | 抵达模型的方式 |
 |---|---|---|---|
-| 记忆 | `.workbuddy/memory/` | `.dsh/memory/` | prompt 段落 + 6 个工具 |
-| 规则 | `.workbuddy/rules/*.md` | —（无源即不注入） | prompt 段落 + 2 个工具 |
-| 技能 | `.workbuddy/skills/` | —（无源即无候选） | 注册进 `ctx.skills` 的原生 provider |
+| 人格 persona | `.dsh/persona/*.md` | `$DSH_HOME/persona/*.md` | prompt 段落 + 2 个工具 |
+| 情绪 mood | `.dsh/mood/current.md` | `$DSH_HOME/mood/current.md` | prompt 段落（衰减）+ 2 个工具 |
+| 记忆 memory | `.workbuddy/memory/` 或 `.dsh/memory/` | `$DSH_HOME/memory/` | 两个 prompt 段落 + 6 个工具 |
+| 规则 rules | `.workbuddy/rules/*.md` | `$DSH_HOME/rules/*.md` | 两个 prompt 段落 + 2 个工具 |
+| 技能 skills | `.workbuddy/skills/` | DSH 原生 `$DSH_HOME/skills`（本行不接管） | 注册进 `ctx.skills` 的原生 provider |
 
 本行不发布任何服务——它只消费 `fs`、`agents`、`systemPrompt`、`sandboxPolicy`、`tools`、`skills`——因此可直接挂在 preset 中，无需 `isolate` realm。
 
@@ -49,26 +52,48 @@ kind: "package-reference"
     indexPromptBytes: 7000
     rulesPromptBytes: 49152
     ruleFileBytes: 16384
+    personaPromptBytes: 3072
+    personaFileBytes: 8192
+    moodPromptBytes: 512
+    moodHalfLifeHours: 6
+    moodMaxAgeHours: 48
+    globalIndexPromptBytes: 3072
+    globalRulesPromptBytes: 12288
+    globalRoot: ''          # 空 = 跟随 $DSH_HOME，再退 ~/.dsh
 ```
 
 | 字段 | 默认值 | 含义 |
 |---|---|---|
-| `indexPromptBytes` | `7000` | 每轮注入 prompt 的索引文本字节上限；其余部分仍可通过 `memory_read` 读取。 |
-| `rulesPromptBytes` | `49152` | 整个规则段落（常驻册 + 已触发条件册 + 未触发清单 + 说明）的字节上限。这是防病态 rules 目录的护栏而非配额：册子本身更小时只按实际花费计。 |
+| `indexPromptBytes` | `7000` | 每轮注入 prompt 的工作区索引文本字节上限；其余部分仍可通过 `memory_read` 读取。 |
+| `rulesPromptBytes` | `49152` | 工作区规则段落（常驻册 + 已触发条件册 + 未触发清单 + 说明）的字节上限。这是防病态 rules 目录的护栏而非配额：册子本身更小时只按实际花费计。 |
 | `ruleFileBytes` | `16384` | 单册字节上限，对齐 WorkBuddy 自己约 16 KB 的契约。 |
+| `personaPromptBytes` | `3072` | 人格段落总预算（两作用域合并后）。 |
+| `personaFileBytes` | `8192` | 单个人格片段上限；超出截断并留 `persona_read` 指针。 |
+| `moodPromptBytes` | `512` | 情绪段落预算——故意很小，情绪只是一行状态。 |
+| `moodHalfLifeHours` | `6` | 情绪衰减半衰期；一个半衰期后权重减半。 |
+| `moodMaxAgeHours` | `48` | 超过该年龄的情绪视为「已平复」，不再注入具体状态。 |
+| `globalIndexPromptBytes` | `3072` | 全局记忆索引段落预算，与工作区索引分开，互不挤占。 |
+| `globalRulesPromptBytes` | `12288` | 全局规则段落预算，与工作区规则分开。 |
+| `globalRoot` | `''` | 全局作用域根；空则跟随 `$DSH_HOME`，再退 `~/.dsh`。 |
+
 
 ### 它贡献的工具
 
 | 工具 | 用途 |
 |---|---|
-| `memory_status` | 报告生效后端、解析出的路径、索引大小与可用的日期流水。 |
-| `memory_read` | 读取索引（`layer=index`）或某一天的流水（`layer=ledger`）。 |
-| `memory_search` | 在索引与所有流水中做大小写不敏感的字面子串检索。 |
-| `memory_write` | 经准入审查后，向当日流水追加一条持久条目。 |
+| `self_status` | 两个作用域 × 全部层的全景：目录、条目数、字节、预算、继承开关、情绪衰减结果、阻塞原因。 |
+| `memory_status` | 报告工作区后端与全局记忆的路径、索引大小、流水布局与继承开关。 |
+| `memory_read` | 读取索引（`layer=index`）或某一天的流水（`layer=ledger`）；`scope` 选工作区或全局。 |
+| `memory_search` | 在索引与所有流水中做大小写不敏感的字面子串检索；默认 `scope=both`。 |
+| `memory_write` | 经准入审查后，向当日流水追加一条持久条目；全局只接受四类结论。 |
 | `memory_promote` | 在指定章节下向索引加入一行，使其每轮都被注入。 |
-| `memory_help` | 说明当前生效的写入准则与准入策略。 |
-| `rule_status` | 报告 `.workbuddy/rules/` 的册子清单、分类、触发 glob 与已触发状态。 |
-| `rule_read` | 读取一册规则的完整正文（绕过 16 KB 注入上限）。 |
+| `memory_help` | 说明当前生效的写入准则与准入策略（含全局 vs 工作区的判定）。 |
+| `rule_status` | 报告工作区与全局两套规则册的清单、分类、触发 glob 与已触发状态。 |
+| `rule_read` | 读取一册规则的完整正文（绕过 16 KB 注入上限）；`scope` 选作用域。 |
+| `persona_read` | 列人格片段清单或读某一片段全文（工作区同名遮蔽全局）。 |
+| `persona_write` | 写人格片段（`replace` / `append`）；密钥与 PII 硬拒，超预算硬拒。 |
+| `mood_get` | 读情绪原始状态与衰减后视图（年龄、权重、是否已平复、生效来源）。 |
+| `mood_set` | 写情绪状态，自动记 `updated`；只覆盖当前状态，不写历史。 |
 
 技能**没有**专属工具：它们进入原生 skill 目录，由标准 `skill` 工具加载。
 
@@ -86,9 +111,9 @@ kind: "package-reference"
 <a id="understand-the-implementation"></a>
 ## 理解实现
 
-### 三层
+### 五个层、两个作用域
 
-记忆两层后端共用一套模型。索引是唯一常驻上下文的部分；流水是可检索的记录；证据留在本来就拥有它的文档与代码里。
+记忆两层后端共用一套模型。索引是唯一常驻上下文的部分；流水是可检索的记录；证据留在本来就拥有它的文档与代码里。人格与情绪是 0.5.0 新增的两层，与记忆/规则共用同一套作用域、预算与「同步 provider + 异步探测」机制；它们的完整设计（目录布局、遮蔽语义、情绪衰减、`inherit` 两轴开关、全局根命名冲突评估）见 [DESIGN-self-scopes.zh.md](DESIGN-self-scopes.zh.md)。
 
 | 层 | 文件 | 生命周期 | 内容 |
 |---|---|---|---|
@@ -233,8 +258,9 @@ WorkBuddy 的日期流水有两种真实布局：平铺在记忆目录下（`mem
 
 以下限制界定了本行不适用的场景。它们是当前的包约束，不是任务清单。
 
-- **仅限工作区作用域** —— 没有全局或跨工作区记忆。后端解析返回的是 `(scope, backend)` 条目列表，读写编排按该列表编写，这即为预留接缝：新增 `global` 后端是纯增量的，但目前不附带任何全局存储。
-- **并发是尽力而为** —— 流水追加与索引插入都是整文件的读—改—写。两个会话在同一瞬间写同一工作区可能丢失一次写入。这里没有锁，本行也不声称原子追加。
+- **全局作用域是进程内缓存** —— 全局层（persona/mood/memory/rules）在工作区之外、跨会话共享，但只在挂载后与新会话（`agent/created`）、以及本进程的工具写入时重读。外部直接编辑 `$DSH_HOME` 下的文件不会实时生效，要等下一次这些时机。
+- **全局写入受沙箱策略约束** —— `$DSH_HOME` 在工作区之外，`workspace-write` 策略会拒绝写入；工具返回可执行的原因（改 `scope="workspace"` 或放宽策略），而不是静默失败。
+- **并发是尽力而为** —— 流水追加与索引插入都是整文件的读—改—写。两个会话在同一瞬间写同一工作区可能丢失一次写入。这里没有锁，本行也不声称原子追加。全局层跨工作区共享同一份文件，该风险更高。
 - **一轮预热** —— prompt provider 无法 await，因此缓存未命中的工作区会先渲染一轮预热提示，之后才出现真实内容。规则段落更安静：缓存未命中时渲染空串，而不是提示。
 - **索引注入是硬性字节上限** —— 过大的 `MEMORY.md` 在 prompt 中会被截断，模型必须调用 `memory_read` 才能看到其余部分。没有任何自动摘要。
 - **按存在性选择后端** —— 生效后端取决于 `.workbuddy/memory` 是否存在。会话中途创建该目录会在下次探测时切换后端，而已写入 `.dsh/memory` 的记忆不会被迁移。
@@ -257,19 +283,22 @@ WorkBuddy 的日期流水有两种真实布局：平铺在记忆目录下（`mem
 
 `inject` 列表列出了全部六个服务，因此缺少任一项的组合会在挂载时直接报错，而不是静默地什么都不贡献。`skills` 之所以是硬依赖而不是可选依赖，是因为本项目遵循同一个取舍：DSH 的 web profile 里 `skill` 注册表恒在 host 平面（被禁用的只有各 preset 自己挂载的 `skill-filesystem` 行），缺注册表的组合本来就用不了技能，静默降级只会掩盖配置错误。
 
-**命名分工是刻意的**：包名与 loader 行 id（`workspace-conventions`）命名**能力范围**，因此它们必须覆盖三层；而两个 prompt 段落仍叫 `workspace-rules` 与 `workspace-memory`，因为它们命名的是**自己的内容**——一个是规则段落，一个是记忆段落。同样地，`docs/legacy-preset/` 里保留旧包名是历史准确性，不是遗漏。改动命名时请维持这条分工，不要为了「grep 干净」把段落也改成前缀形式。
+**命名分工是刻意的**：包名与 loader 行 id（`workspace-conventions`）命名**能力范围**，因此它们必须覆盖全部层；而 prompt 段落仍叫 `workspace-rules`、`workspace-memory`，因为早期版本里它们只服务工作区，现在多了同名的 `global-rules` / `global-memory` 段落——按内容命名仍是这条分工的延续。同样地，`docs/legacy-preset/` 里保留旧包名是历史准确性，不是遗漏。改动命名时请维持这条分工，不要为了「grep 干净」把段落也改成前缀形式。
 
 源码分工：
 
 | 文件 | 职责 |
 |---|---|
-| `src/index.ts` | 装配层：配置 schema、六个记忆工具、两个规则工具、两个 prompt 段落、技能 provider 注册、触碰追踪 |
+| `src/index.ts` | 装配层：配置 schema、十三个工具、六个 prompt 段落、技能 provider 注册、触碰追踪、预热 |
+| `src/scope.ts` | 双层作用域：全局根解析、各层目录、路径包含判断 |
+| `src/persona.ts` | 人格片段（纯逻辑）：解析、排序、遮蔽合并、预算渲染 |
+| `src/mood.ts` | 情绪状态（纯逻辑）：解析/生成、半衰期衰减、确定性渲染 |
 | `src/memory.ts` | 记忆模型（纯逻辑）：准入、条目渲染、索引编辑、流水盘点 |
 | `src/rules.ts` | 规则册解析、分类、glob 触发判定、段落渲染与预算 |
 | `src/skills.ts` | 技能包解析与 `ctx.skills` provider 工厂 |
 | `src/frontmatter.ts` | 刻意收窄的 YAML frontmatter 读取器 |
 | `src/glob.ts` | `**` / `*` / `?` / `{a,b}` 的 glob→正则编译 |
 | `src/text.ts` | 文本归一化、路径显示、字节裁剪 |
-| `src/layout.ts` | 三个兼容层共用的目录名常量 |
+| `src/layout.ts` | 各层共用的目录名常量 |
 
 </details>
