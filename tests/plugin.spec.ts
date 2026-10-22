@@ -16,6 +16,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { apply, type Config } from '../src/index.ts'
 
+/**
+ * The switch tests below write `workspace.yml` after `apply()` has already
+ * warmed its caches. Seeding is a live-provider convenience that creates the
+ * starter file in a workspace that has none; here it would race the test's own
+ * writes and is covered by workspace-config.spec directly.
+ */
+process.env['DSH_SEED_WORKSPACE_CONFIG'] = '0'
+
 const WORKSPACE = fileURLToPath(new URL('./fixtures/workbuddy', import.meta.url))
 const SKILL_DIR = join(WORKSPACE, '.workbuddy', 'skills', 'fixture-skill')
 
@@ -42,7 +50,7 @@ interface FakeTool {
  * The filesystem stands in for `ctx.fs` with real Node reads, so discovery,
  * parsing and rendering all run against the fixture's actual bytes.
  */
-function harness(workspace: string = WORKSPACE): {
+function harness(workspace: string = WORKSPACE, options: { readonly globalRoot?: string } = {}): {
   /** The prompt sections, carrying the agent they were mounted for. */
   sections: Section[] & { readonly agent: FakeAgent }
   tools: FakeTool[]
@@ -69,6 +77,10 @@ function harness(workspace: string = WORKSPACE): {
         } catch { return undefined }
       },
       readText: async (target: { path: string }) => await readFile(target.path, 'utf8'),
+      writeText: async (target: { path: string }, content: string) => {
+        await mkdir(dirname(target.path), { recursive: true })
+        await writeFile(target.path, content, 'utf8')
+      },
       listDir: async (target: { path: string }) => (await readdir(target.path, { withFileTypes: true }))
         .map((entry) => ({ name: entry.name, type: entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other' })),
     },
@@ -82,7 +94,12 @@ function harness(workspace: string = WORKSPACE): {
     logger: { warn: () => undefined },
   }
 
-  const config: Config = { indexPromptBytes: 7000, rulesPromptBytes: 32 * 1024, ruleFileBytes: 16 * 1024 }
+  const config: Config = {
+    indexPromptBytes: 7000,
+    rulesPromptBytes: 32 * 1024,
+    ruleFileBytes: 16 * 1024,
+    ...options.globalRoot !== undefined ? { globalRoot: options.globalRoot } : {},
+  }
   apply(ctx as never, config)
 
   return {
@@ -115,13 +132,21 @@ const section = (sections: readonly Section[] & { readonly agent?: FakeAgent }, 
   sections.find((entry) => entry.name === name)?.text({ agent: sections.agent ?? AGENT }) ?? ''
 
 describe('row wiring', () => {
-  it('registers both prompt sections, rules before memory', () => {
+  it('registers the six prompt sections in persona → mood → rules → memory order', () => {
     const { sections } = harness()
-    expect(sections.map((s) => s.name)).toEqual(['workspace-rules', 'workspace-memory'])
-    expect(sections[0]?.order).toBeLessThan(sections[1]?.order ?? 0)
+    expect(sections.map((s) => s.name)).toEqual([
+      'workspace-persona',
+      'workspace-mood',
+      'global-rules',
+      'workspace-rules',
+      'global-memory',
+      'workspace-memory',
+    ])
+    const orders = sections.map((s) => s.order)
+    expect([...orders].sort((left, right) => left - right)).toEqual(orders)
   })
 
-  it('registers the eight tools it documents', () => {
+  it('registers the thirteen tools it documents', () => {
     expect(harness().tools.map((tool) => tool.name)).toEqual([
       'memory_status',
       'memory_read',
@@ -131,6 +156,11 @@ describe('row wiring', () => {
       'memory_help',
       'rule_status',
       'rule_read',
+      'self_status',
+      'persona_read',
+      'persona_write',
+      'mood_get',
+      'mood_set',
     ])
   })
 
@@ -317,9 +347,17 @@ describe('project-level layer switches', () => {
     await configured(harnessed, 'rule_status')
 
     const status = await harnessed.tools.find((tool) => tool.name === 'rule_status')?.execute({}) as {
-      config: { layers: { memory: string, rules: boolean, skills: boolean, memoryLayout: string } }
+      config: { layers: { memory: string, rules: boolean, skills: boolean, persona: boolean, mood: boolean, inherit: Record<string, boolean>, memoryLayout: string } }
     }
-    expect(status.config.layers).toEqual({ memory: 'enabled', rules: true, skills: true, memoryLayout: 'auto' })
+    expect(status.config.layers).toEqual({
+      memory: 'enabled',
+      rules: true,
+      skills: true,
+      persona: true,
+      mood: true,
+      inherit: { persona: true, mood: true, memory: true, rules: true },
+      memoryLayout: 'auto',
+    })
   })
 
   it('memory read-only: no section, writes refused, reads still served', async () => {
@@ -378,5 +416,155 @@ describe('project-level layer switches', () => {
     expect(status.ok).toBe(false)
     expect(status.error).toContain('配置错误')
     expect(status.configIssues.join(' ')).toContain('memroy')
+  })
+})
+
+describe('the global scope and the self layers', () => {
+  let workspace: string
+  let globalRoot: string
+
+  beforeEach(async () => {
+    const base = await mkdtemp(join(tmpdir(), 'dsh-self-'))
+    workspace = join(base, 'project')
+    globalRoot = join(base, 'home')
+    await mkdir(join(workspace, '.dsh'), { recursive: true })
+    await mkdir(join(globalRoot, 'persona'), { recursive: true })
+    await mkdir(join(globalRoot, 'mood'), { recursive: true })
+    await mkdir(join(globalRoot, 'memory'), { recursive: true })
+    await mkdir(join(globalRoot, 'rules'), { recursive: true })
+  })
+
+  afterEach(async () => {
+    await rm(dirname(workspace), { recursive: true, force: true })
+  })
+
+  const put = async (path: string, text: string): Promise<void> => {
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, text, 'utf8')
+  }
+
+  it('injects global persona fragments and lets the workspace shadow one by name', async () => {
+    await put(join(globalRoot, 'persona', '01-identity.md'), '---\ntitle: 全局身份\n---\n\n你是全局人格。')
+    await put(join(globalRoot, 'persona', '02-voice.md'), '---\ntitle: 语气\n---\n\n说话简洁。')
+    const harnessed = harness(workspace, { globalRoot })
+    const first = await settled(
+      () => section(harnessed.sections, 'workspace-persona'),
+      (value) => value.includes('你是全局人格。'),
+    )
+    expect(first).toContain('## 人格')
+    expect(first).toContain('说话简洁。')
+
+    // Writing through the tool refreshes the cache, which is exactly what a real
+    // session does; a raw file write would legitimately stay invisible until the
+    // next probe, and this test is about shadowing, not about watchers.
+    const writeTool = harnessed.tools.find((tool) => tool.name === 'persona_write')
+    await writeTool?.execute({ name: '01-identity', content: '---\ntitle: 项目身份\n---\n\n你是项目人格。' })
+
+    const shadowed = await settled(
+      () => section(harnessed.sections, 'workspace-persona'),
+      (value) => value.includes('你是项目人格。'),
+    )
+    expect(shadowed).not.toContain('你是全局人格。')
+    expect(shadowed).toContain('说话简洁。')
+  })
+
+  it('blocks the global persona when the workspace says inherit.persona: false', async () => {
+    await put(join(globalRoot, 'persona', '01-identity.md'), '---\ntitle: 全局身份\n---\n\n你是全局人格。')
+    await put(join(workspace, '.dsh', 'workspace.yml'), 'workspace-conventions:\n  inherit:\n    persona: false\n')
+    const harnessed = harness(workspace, { globalRoot })
+    await settled(() => section(harnessed.sections, 'workspace-memory'), (value) => value.length > 0)
+    expect(section(harnessed.sections, 'workspace-persona')).toBe('')
+  })
+
+  it('writes and reads a workspace mood, and reports the decayed view', async () => {
+    const harnessed = harness(workspace, { globalRoot })
+    const set = harnessed.tools.find((tool) => tool.name === 'mood_set')
+    const written = await set?.execute({ label: '专注', valence: 0.4, arousal: 0.3, note: '收尾中' }) as { ok: boolean }
+    expect(written.ok).toBe(true)
+
+    const text = await settled(
+      () => section(harnessed.sections, 'workspace-mood'),
+      (value) => value.includes('专注'),
+    )
+    expect(text).toContain('## 情绪')
+    expect(text).toContain('专注')
+
+    const get = harnessed.tools.find((tool) => tool.name === 'mood_get')
+    const view = await get?.execute({}) as { ok: boolean, workspace: { present: boolean, label: string, weight: number } }
+    expect(view.ok).toBe(true)
+    expect(view.workspace.present).toBe(true)
+    expect(view.workspace.label).toBe('专注')
+    expect(view.workspace.weight).toBeGreaterThan(0.9)
+  })
+
+  it('injects the global memory index and blocks it under inherit.memory: false', async () => {
+    await put(join(globalRoot, 'memory', 'MEMORY.md'), '# 全局\n\n## 硬约束\n\n- 跨工作区约定：所有项目用中文回复。\n')
+    const harnessed = harness(workspace, { globalRoot })
+    const text = await settled(
+      () => section(harnessed.sections, 'global-memory'),
+      (value) => value.includes('跨工作区约定'),
+    )
+    expect(text).toContain('全局记忆（跨工作区')
+    expect(text).toContain('跨工作区约定')
+
+    await writeFile(join(workspace, '.dsh', 'workspace.yml'), 'workspace-conventions:\n  inherit:\n    memory: false\n', 'utf8')
+    const blocked = harness(workspace, { globalRoot })
+    await settled(() => section(blocked.sections, 'workspace-memory'), (value) => value.length > 0)
+    expect(section(blocked.sections, 'global-memory')).toBe('')
+    const read = blocked.tools.find((tool) => tool.name === 'memory_read')
+    const refused = await read?.execute({ layer: 'index', scope: 'global' }) as { ok: boolean, error: string }
+    expect(refused.ok).toBe(false)
+    expect(refused.error).toContain('屏蔽')
+  })
+
+  it('round-trips a persona fragment through persona_write and persona_read', async () => {
+    const harnessed = harness(workspace, { globalRoot })
+    const writeTool = harnessed.tools.find((tool) => tool.name === 'persona_write')
+    const result = await writeTool?.execute({ name: '02-voice', content: '---\ntitle: 语气\n---\n\n回答先给结论。' }) as { ok: boolean }
+    expect(result.ok).toBe(true)
+
+    // The secret screen is shared with memory and cannot be forced.
+    const secret = await writeTool?.execute({ name: '03-bad', content: 'api_key = sk-abcdef1234567890' }) as { ok: boolean, reasons: readonly string[] }
+    expect(secret.ok).toBe(false)
+    expect(secret.reasons.join(' ')).toContain('密钥')
+
+    const read = harnessed.tools.find((tool) => tool.name === 'persona_read')
+    const found = await read?.execute({ name: '02-voice' }) as { ok: boolean, body: string, title: string }
+    expect(found.ok).toBe(true)
+    expect(found.title).toBe('语气')
+    expect(found.body).toContain('回答先给结论。')
+  })
+
+  it('reports both scopes through self_status', async () => {
+    await put(join(globalRoot, 'memory', 'MEMORY.md'), '# 全局\n\n- 全局条目\n')
+    await put(join(globalRoot, 'persona', '01-identity.md'), '---\ntitle: 全局身份\n---\n\n全局人格。')
+    const harnessed = harness(workspace, { globalRoot })
+    const status = await harnessed.tools.find((tool) => tool.name === 'self_status')?.execute({}) as {
+      ok: boolean
+      globalRoot: string
+      layers: {
+        persona: { global: { fragments: readonly { name: string }[] } }
+        memory: { global: { indexBytes: number } }
+      }
+    }
+    expect(status.ok).toBe(true)
+    expect(status.globalRoot).toContain('home')
+    expect(status.layers.persona.global.fragments.map((f) => f.name)).toContain('01-identity')
+    expect(status.layers.memory.global.indexBytes).toBeGreaterThan(0)
+  })
+
+  it('injects a global rule book and reads it through rule_read(scope: global)', async () => {
+    await put(join(globalRoot, 'rules', '00-global.md'), '---\nalwaysApply: true\n---\n\n# 全局约定\n\n所有项目都遵守这一条。\n')
+    const harnessed = harness(workspace, { globalRoot })
+    const text = await settled(
+      () => section(harnessed.sections, 'global-rules'),
+      (value) => value.includes('所有项目都遵守这一条'),
+    )
+    expect(text).toContain('全局约定')
+
+    const read = harnessed.tools.find((tool) => tool.name === 'rule_read')
+    const found = await read?.execute({ file: '00-global.md', scope: 'global' }) as { ok: boolean, text: string }
+    expect(found.ok).toBe(true)
+    expect(found.text).toContain('所有项目都遵守这一条')
   })
 })

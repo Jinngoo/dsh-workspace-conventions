@@ -64,7 +64,19 @@ export type MemoryMode = 'enabled' | 'read-only' | 'disabled'
  */
 export type MemoryLayoutPreference = 'auto' | 'flat' | 'host'
 
-/** The resolved switches for this plugin's three layers. */
+/** The layers whose global counterpart a workspace may inherit or block. */
+export interface InheritConfig {
+  /** `true` merges the global persona fragments; `false` blocks them. */
+  readonly persona: boolean
+  /** `true` may fall back to the global mood state; `false` blocks it. */
+  readonly mood: boolean
+  /** `true` injects and reads the global memory index; `false` blocks it. */
+  readonly memory: boolean
+  /** `true` injects the global rule books; `false` blocks them. */
+  readonly rules: boolean
+}
+
+/** The resolved switches for this plugin's layers plus the two scope axes. */
 export interface LayerConfig {
   /** `enabled` injects and writes, `read-only` stops writing, `disabled` is off. */
   readonly memory: MemoryMode
@@ -72,12 +84,29 @@ export interface LayerConfig {
   readonly rules: boolean
   /** `true` publishes `.workbuddy/skills`, `false` disables the layer. */
   readonly skills: boolean
+  /** `true` injects persona fragments, `false` disables the layer. */
+  readonly persona: boolean
+  /** `true` injects the mood state, `false` disables the layer. */
+  readonly mood: boolean
+  /** Whether each layer inherits the global scope's counterpart. */
+  readonly inherit: InheritConfig
   /** Which layout new ledgers use. */
   readonly memoryLayout: MemoryLayoutPreference
 }
 
 /** The switches every workspace starts from. */
-export const DEFAULT_LAYERS: LayerConfig = { memory: 'enabled', rules: true, skills: true, memoryLayout: 'auto' }
+export const DEFAULT_LAYERS: LayerConfig = {
+  memory: 'enabled',
+  rules: true,
+  skills: true,
+  persona: true,
+  mood: true,
+  inherit: { persona: true, mood: true, memory: true, rules: true },
+  memoryLayout: 'auto',
+}
+
+/** The global scope is inherited by default; blocking one layer is a per-workspace opt-out. */
+export const DEFAULT_INHERIT: InheritConfig = { persona: true, mood: true, memory: true, rules: true }
 
 /**
  * What a file that could not be read or understood resolves to: every layer
@@ -85,9 +114,18 @@ export const DEFAULT_LAYERS: LayerConfig = { memory: 'enabled', rules: true, ski
  * switch silently inert, which is the failure this file exists to prevent.
  *
  * `memoryLayout` is not a layer, so it keeps its default — with the memory layer
- * stopped there is no ledger to write.
+ * stopped there is no ledger to write. `inherit` keeps its defaults because it
+ * only narrows what a live layer may read, and every live layer is stopped here.
  */
-const FAIL_CLOSED: LayerConfig = { memory: 'disabled', rules: false, skills: false, memoryLayout: 'auto' }
+const FAIL_CLOSED: LayerConfig = {
+  memory: 'disabled',
+  rules: false,
+  skills: false,
+  persona: false,
+  mood: false,
+  inherit: DEFAULT_INHERIT,
+  memoryLayout: 'auto',
+}
 
 /** One problem found while reading the file. */
 export interface ConfigIssue {
@@ -184,6 +222,17 @@ export async function readWorkspaceConfig(reader: ConfigReader, workspace: strin
   }
 }
 
+/** The mutable shape `interpret` folds into; the exported `LayerConfig` stays readonly. */
+interface MutableLayers {
+  memory: MemoryMode
+  rules: boolean
+  skills: boolean
+  persona: boolean
+  mood: boolean
+  inherit: InheritConfig
+  memoryLayout: MemoryLayoutPreference
+}
+
 /**
  * Fold a parsed document into this plugin's switches.
  * @param document - the parsed top-level map.
@@ -191,7 +240,7 @@ export async function readWorkspaceConfig(reader: ConfigReader, workspace: strin
  */
 export function interpret(document: PatchMap): Interpretation {
   const issues: ConfigIssue[] = []
-  const layers: { memory: MemoryMode, rules: boolean, skills: boolean, memoryLayout: MemoryLayoutPreference } = { ...DEFAULT_LAYERS }
+  const layers: MutableLayers = { ...DEFAULT_LAYERS, inherit: { ...DEFAULT_INHERIT } }
 
   const version = document['version']
   if (version !== undefined && typeof version !== 'number') {
@@ -213,12 +262,14 @@ export function interpret(document: PatchMap): Interpretation {
  * Read a layer-keyed section into the resolved switches.
  *
  * `layers` is the convenience section that applies to every plugin; the
- * plugin's own section has the same shape, so both go through here.
+ * plugin's own section has the same shape, so both go through here. Two axes
+ * live side by side: which layers run, and — in the nested `inherit` mapping —
+ * whether each running layer may also read the global scope's counterpart.
  */
 function applySection(
   section: PatchValue | undefined,
   name: string,
-  layers: { memory: MemoryMode, rules: boolean, skills: boolean, memoryLayout: MemoryLayoutPreference },
+  layers: MutableLayers,
   issues: ConfigIssue[],
 ): void {
   if (section === undefined) return
@@ -236,7 +287,7 @@ function applySection(
       continue
     }
 
-    if (key === 'rules' || key === 'skills') {
+    if (key === 'rules' || key === 'skills' || key === 'persona' || key === 'mood') {
       const enabled = readToggle(raw, `${name}.${key}`, issues)
       if (enabled !== undefined) layers[key] = enabled
       continue
@@ -248,10 +299,46 @@ function applySection(
       continue
     }
 
+    if (key === 'inherit') {
+      applyInherit(raw, `${name}.inherit`, layers, issues)
+      continue
+    }
+
     issues.push({
       line: 0,
-      message: `\`${name}\` has an unknown key \`${key}\`; this plugin understands \`memory\`, \`memoryLayout\`, \`rules\`, \`skills\``,
+      message: `\`${name}\` has an unknown key \`${key}\`; this plugin understands \`memory\`, \`memoryLayout\`, \`rules\`, \`skills\`, \`persona\`, \`mood\`, \`inherit\``,
     })
+  }
+}
+
+/**
+ * Read the nested `inherit` mapping.
+ *
+ * A layer named here that is not one of the four inheritable ones is an issue
+ * rather than a silent ignore: writing `inherit: { remember: false }` and
+ * believing the global memory is blocked is exactly the inert-switch failure the
+ * rest of this file guards against.
+ * @param raw - the mapping value.
+ * @param where - dotted path for messages.
+ * @param layers - switches to update in place.
+ * @param issues - issue sink.
+ */
+function applyInherit(raw: PatchValue, where: string, layers: MutableLayers, issues: ConfigIssue[]): void {
+  if (!isPlainObject(raw)) {
+    issues.push({ line: 0, message: `\`${where}\` must be a mapping of layer switches, found ${describe(raw)}` })
+    return
+  }
+  for (const key of Object.keys(raw)) {
+    const value = Reflect.get(raw, key) as PatchValue
+    if (key !== 'persona' && key !== 'mood' && key !== 'memory' && key !== 'rules') {
+      issues.push({
+        line: 0,
+        message: `\`${where}\` has an unknown layer \`${key}\`; it understands \`persona\`, \`mood\`, \`memory\`, \`rules\``,
+      })
+      continue
+    }
+    const enabled = readToggle(value, `${where}.${key}`, issues)
+    if (enabled !== undefined) layers.inherit = { ...layers.inherit, [key]: enabled }
   }
 }
 
@@ -315,11 +402,11 @@ function describe(value: PatchValue): string {
  * exist, and putting a real default value in it would silently re-implement the
  * default it replaced.
  */
-export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。全部内容可选——本文件全注释时行为等于「三层全开」。
+export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。全部内容可选——本文件全注释时行为等于「所有层全开、并继承全局」。
 # 插件各占一段，段名是该插件在组合里的行 id；本插件是 workspace-conventions。
 # 规格与复用约定：@jinngoo/dsh-workspace-conventions 的 docs/workspace-config.md
 #
-# 未知键或类型不对会让三层全部停用，并在工具里报出原因（防拼错的开关静默失效）。
+# 未知键或类型不对会让所有层全部停用，并在工具里报出原因（防拼错的开关静默失效）。
 #
 # version: 1
 #
@@ -327,10 +414,20 @@ export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。
 #   rules: false
 #
 # workspace-conventions:
+#   # 第一轴：这一层是否启用
 #   memory: enabled          # enabled | read-only | disabled
 #   rules: true
 #   skills: true
+#   persona: true
+#   mood: true
 #   memoryLayout: auto       # auto | flat | host
+#
+#   # 第二轴：是否继承全局作用域（false = 屏蔽全局，只看本工作区）
+#   inherit:
+#     persona: true
+#     mood: true
+#     memory: true
+#     rules: true
 `
 
 /** The outcome of making sure a workspace has a configuration file. */
@@ -367,6 +464,10 @@ export async function ensureWorkspaceConfig(
     // `.dsh/` usually does not exist yet in a project that has never been
     // configured, and a write into a missing directory fails outright.
     await reader.mkdir?.(dirname(absolute))
+    // Re-check immediately before writing: the filesystem read above can await,
+    // and a file another process (or the user's editor) created in that window
+    // must win over the starter template rather than be overwritten by it.
+    if (await reader.stat(absolute)) return { created: false, exists: true, path: absolute }
     await writer(absolute, WORKSPACE_CONFIG_TEMPLATE)
     return { created: true, exists: true, path: absolute }
   } catch (error) {

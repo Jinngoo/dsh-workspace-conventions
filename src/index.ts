@@ -70,6 +70,29 @@ import {
   type RuleDefinition,
 } from './rules.js'
 import {
+  DEFAULT_MOOD_HALF_LIFE_HOURS,
+  DEFAULT_MOOD_MAX_AGE_HOURS,
+  MOOD_FILE_NAME,
+  buildMoodDocument,
+  moodView,
+  parseMoodDocument,
+  renderMoodSection,
+  type MoodState,
+} from './mood.js'
+import {
+  mergePersona,
+  parsePersonaFragment,
+  renderPersonaSection,
+  sortPersona,
+  type PersonaFragment,
+} from './persona.js'
+import {
+  globalLayerDir,
+  resolveGlobalRoot,
+  workspaceLayerDir,
+  type LayerScope,
+} from './scope.js'
+import {
   SKILLS_DIR_REL,
   createWorkbuddySkillProvider,
   type SkillStoreReader,
@@ -116,6 +139,34 @@ export {
   upsertIndexEntry,
 }
 export { detectSectionLevel, parseIndexDocument } from './memory.js'
+export {
+  DEFAULT_MOOD_HALF_LIFE_HOURS,
+  DEFAULT_MOOD_MAX_AGE_HOURS,
+  MOOD_FILE_NAME,
+  buildMoodDocument,
+  moodView,
+  parseMoodDocument,
+  renderMoodSection,
+} from './mood.js'
+export {
+  mergePersona,
+  parsePersonaFragment,
+  renderPersonaSection,
+  sortPersona,
+} from './persona.js'
+export {
+  LAYERS as SELF_LAYERS,
+  globalLayerDir,
+  isWithin,
+  layerDir,
+  resolveGlobalRoot,
+  scopeRoot,
+  workspaceLayerDir,
+} from './scope.js'
+export { DEFAULT_INHERIT } from './workspace-config.js'
+export type { MoodDecayOptions, MoodRenderOptions, MoodState, MoodView } from './mood.js'
+export type { PersonaFragment, PersonaMerge, PersonaRender, PersonaRenderOptions } from './persona.js'
+export type { LayerName, LayerScope } from './scope.js'
 export { parseFrontmatter, readFrontmatterBoolean } from './frontmatter.js'
 export { expandBraces, matchGlob } from './glob.js'
 export { matchingRules, parseRule, renderRulesSection } from './rules.js'
@@ -145,13 +196,64 @@ export interface Config {
   rulesPromptBytes: number
   /** Per-book byte cap, matching WorkBuddy's own ~16 KB contract. */
   ruleFileBytes: number
+  /**
+   * Byte cap on the injected persona section (`persona/*.md` fragments of both
+   * scopes). Kept well below the rules budget: persona is identity prose, not a
+   * reference manual, and every turn pays for it.
+   */
+  personaPromptBytes: number
+  /** Per-fragment byte cap; a longer fragment is truncated and pointed at by `persona_read`. */
+  personaFileBytes: number
+  /** Byte cap on the injected mood line. Deliberately tiny: a mood is one line of state. */
+  moodPromptBytes: number
+  /** Half-life of the mood decay, in hours. After one half-life the state reads half as strong. */
+  moodHalfLifeHours: number
+  /** Age after which a mood is reported as settled instead of current. */
+  moodMaxAgeHours: number
+  /** Byte cap on the global (cross-workspace) memory index section. */
+  globalIndexPromptBytes: number
+  /** Byte cap on the global rules section, kept separate so neither scope starves the other. */
+  globalRulesPromptBytes: number
+  /**
+   * Override for the global scope root. Empty follows the process `$DSH_HOME`
+   * and falls back to `~/.dsh`, matching DSH's own home resolution.
+   *
+   * The default puts the four global layer directories at `$DSH_HOME/{persona,
+   * mood,memory,rules}` — names DSH itself does not use today. If a future
+   * mechanism claims one of them, pointing this at a private directory moves
+   * every global layer without a code change.
+   */
+  globalRoot: string
+}
+
+/** Every config default in one object: the row schema and the defensive merge both read it. */
+const CONFIG_DEFAULTS: Config = {
+  indexPromptBytes: 7000,
+  rulesPromptBytes: 48 * 1024,
+  ruleFileBytes: RULE_FILE_BYTES,
+  personaPromptBytes: 3 * 1024,
+  personaFileBytes: 8 * 1024,
+  moodPromptBytes: 512,
+  moodHalfLifeHours: DEFAULT_MOOD_HALF_LIFE_HOURS,
+  moodMaxAgeHours: DEFAULT_MOOD_MAX_AGE_HOURS,
+  globalIndexPromptBytes: 3 * 1024,
+  globalRulesPromptBytes: 12 * 1024,
+  globalRoot: '',
 }
 
 /** Runtime schema for the row. */
 export const Config: z<Config> = z.object({
-  indexPromptBytes: z.number().default(7000),
-  rulesPromptBytes: z.number().default(48 * 1024),
-  ruleFileBytes: z.number().default(RULE_FILE_BYTES),
+  indexPromptBytes: z.number().default(CONFIG_DEFAULTS.indexPromptBytes),
+  rulesPromptBytes: z.number().default(CONFIG_DEFAULTS.rulesPromptBytes),
+  ruleFileBytes: z.number().default(CONFIG_DEFAULTS.ruleFileBytes),
+  personaPromptBytes: z.number().default(CONFIG_DEFAULTS.personaPromptBytes),
+  personaFileBytes: z.number().default(CONFIG_DEFAULTS.personaFileBytes),
+  moodPromptBytes: z.number().default(CONFIG_DEFAULTS.moodPromptBytes),
+  moodHalfLifeHours: z.number().default(CONFIG_DEFAULTS.moodHalfLifeHours),
+  moodMaxAgeHours: z.number().default(CONFIG_DEFAULTS.moodMaxAgeHours),
+  globalIndexPromptBytes: z.number().default(CONFIG_DEFAULTS.globalIndexPromptBytes),
+  globalRulesPromptBytes: z.number().default(CONFIG_DEFAULTS.globalRulesPromptBytes),
+  globalRoot: z.string().default(CONFIG_DEFAULTS.globalRoot),
 })
 
 /** The resolved state of one workspace's memory store. */
@@ -193,6 +295,36 @@ interface WorkspaceRulesState {
   readonly rules: readonly RuleDefinition[]
 }
 
+/** One memory store, either the workspace backend or the single global store. */
+interface MemoryStoreState {
+  /** Absolute store directory. */
+  readonly dir: string
+  /** Absolute index path. */
+  readonly index: string
+  /** Whether an index file exists. */
+  readonly hasIndex: boolean
+  /** Index size in bytes. */
+  readonly bytes: number
+  /** Index text, or `''` when absent. */
+  readonly indexText: string
+  /** This computer's name, as the OS reports it. */
+  readonly host: string
+  /** The layout discovered in the store. */
+  readonly layout: LedgerLayout
+  /** Computer-name subdirectory receiving new ledgers; `''` in the flat layout. */
+  readonly hostDir: string
+  /** Every dated ledger in the store, newest first. */
+  readonly ledgers: readonly LedgerFile[]
+}
+
+/** The workspace persona fragments plus the issues met while parsing them. */
+interface WorkspacePersonaState {
+  /** Fragments found under `<workspace>/.dsh/persona`, sorted by order then name. */
+  readonly fragments: readonly PersonaFragment[]
+  /** Parse issues worth reporting through the status tools. */
+  readonly issues: readonly string[]
+}
+
 const EMPTY_RULES: ReadonlySet<string> = new Set()
 
 /**
@@ -202,16 +334,44 @@ const EMPTY_RULES: ReadonlySet<string> = new Set()
  * @param config - the injected-index cap, the rules cap and the per-book cap.
  */
 export function apply(ctx: Context, config: Config): void {
+  // Defensive merge: a hand-composed row (or an older profile patch) can call
+  // apply() with only the fields it knows about. The schema fills defaults on the
+  // official path; this makes the function total on every path.
+  config = { ...CONFIG_DEFAULTS, ...config }
   const indexPromptBytes = config.indexPromptBytes
   const rulesPromptBytes = config.rulesPromptBytes
   const ruleFileBytes = config.ruleFileBytes
+  const personaPromptBytes = config.personaPromptBytes
+  const personaFileBytes = config.personaFileBytes
+  const moodPromptBytes = config.moodPromptBytes
+  const moodHalfLifeHours = config.moodHalfLifeHours
+  const moodMaxAgeHours = config.moodMaxAgeHours
+  const globalIndexPromptBytes = config.globalIndexPromptBytes
+  const globalRulesPromptBytes = config.globalRulesPromptBytes
   const fs = ctx.fs
   const agents = ctx.agents
   const prompt = ctx.systemPrompt
   const host = hostname()
+  /** The global scope root: `globalRoot` when configured, else `$DSH_HOME`/`~/.dsh`. */
+  const globalRoot = resolveGlobalRoot(config.globalRoot.length > 0 ? config.globalRoot : undefined)
 
   const cache = new Map<string, WorkspaceMemoryState>()
   const rulesCache = new Map<string, WorkspaceRulesState>()
+  const personaCache = new Map<string, WorkspacePersonaState>()
+  /**
+   * One mood state per workspace, plus the single global mood.
+   *
+   * `null` means "probed and absent", which is a different answer from "not
+   * probed yet": the prompt provider must warm up on the first case, and stay
+   * silent on the second rather than claiming a settled mood nobody wrote.
+   */
+  const moodCache = new Map<string, MoodState | null>()
+  const globalCache: {
+    memory: MemoryStoreState | undefined
+    rules: readonly RuleDefinition[] | undefined
+    persona: readonly PersonaFragment[] | undefined
+    mood: MoodState | null | undefined
+  } = { memory: undefined, rules: undefined, persona: undefined, mood: undefined }
   /** Project-level switches per workspace, from `.dsh/workspace.yml`. */
   const configCache = new Map<string, { readonly config: ParsedWorkspaceConfig, readonly stamp: string | undefined }>()
   /**
@@ -224,6 +384,14 @@ export function apply(ctx: Context, config: Config): void {
    * listener and the synchronous prompt provider.
    */
   const triggered = new Map<string, Set<string>>()
+  /**
+   * Conditional GLOBAL rule books already triggered, keyed by workspace.
+   *
+   * Triggers stay per workspace even though the books are global: "this project
+   * touched a matching file" is the relevance signal, and a book triggered in one
+   * project must not be injected into another.
+   */
+  const globalTriggered = new Map<string, Set<string>>()
   const sessions = new Map<string, unknown>()
   let invalidateSkills: (() => void) | undefined
 
@@ -284,34 +452,50 @@ export function apply(ctx: Context, config: Config): void {
     return toPosix(t.displayPath)
   }
 
-  /** Probe both memory backends for one workspace and resolve the active one. */
-  const loadState = async (workspace: string): Promise<WorkspaceMemoryState> => {
-    const probe = async (backendName: string, dir: string) => {
-      const index = join(dir, INDEX_FILE)
-      const info = await statAt(dir)
-      const exists = info?.type === 'directory'
-      const root = exists ? await listAt(dir) : []
-      // One level only: under the per-computer layout a machine name is a direct
-      // child of the store directory, and nothing deeper holds ledgers. Dot
-      // directories are skipped so version-control metadata is never scanned.
-      const subdirs = await Promise.all(
-        root
-          .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('.'))
-          .map(async (entry): Promise<HostDirScan> => ({ name: entry.name, entries: await listAt(join(dir, entry.name)) })),
-      )
-      const scan = scanLedgers(root, subdirs, host, configCache.get(workspace)?.config.layers.memoryLayout ?? DEFAULT_LAYERS.memoryLayout)
-      const indexText = exists ? await readAt(index) : undefined
-      const indexInfo = indexText === undefined ? undefined : await statAt(index)
-      return {
-        name: backendName,
+  /**
+   * Probe one memory store directory.
+   *
+   * One level of subdirectories is scanned only: under the per-computer layout a
+   * machine name is a direct child of the store directory, and nothing deeper
+   * holds ledgers. Dot directories are skipped so version-control metadata is
+   * never scanned. The same probe serves the workspace backends and the single
+   * global store, so both scopes read identically.
+   */
+  const storeOf = async (
+    dir: string,
+    preferredLayout: 'auto' | 'flat' | 'host',
+  ): Promise<{ readonly exists: boolean; readonly state: MemoryStoreState }> => {
+    const index = join(dir, INDEX_FILE)
+    const info = await statAt(dir)
+    const exists = info?.type === 'directory'
+    const root = exists ? await listAt(dir) : []
+    const subdirs = await Promise.all(
+      root
+        .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('.'))
+        .map(async (entry): Promise<HostDirScan> => ({ name: entry.name, entries: await listAt(join(dir, entry.name)) })),
+    )
+    const scan = scanLedgers(root, subdirs, host, preferredLayout)
+    const indexText = exists ? await readAt(index) : undefined
+    const indexInfo = indexText === undefined ? undefined : await statAt(index)
+    return {
+      exists,
+      state: {
         dir,
         index,
-        exists,
         hasIndex: indexText !== undefined,
         bytes: indexInfo?.size ?? 0,
         indexText: indexText ?? '',
+        host,
         ...scan,
-      }
+      },
+    }
+  }
+
+  /** Probe both memory backends for one workspace and resolve the active one. */
+  const loadState = async (workspace: string): Promise<WorkspaceMemoryState> => {
+    const probe = async (backendName: string, dir: string) => {
+      const probed = await storeOf(dir, configCache.get(workspace)?.config.layers.memoryLayout ?? DEFAULT_LAYERS.memoryLayout)
+      return { name: backendName, exists: probed.exists, ...probed.state }
     }
 
     const workbuddy = await probe('workbuddy', join(workspace, WORKBUDDY_DIR, MEMORY_SUBDIR))
@@ -364,10 +548,116 @@ export function apply(ctx: Context, config: Config): void {
     return state
   }
 
+  /** Read persona fragments from one directory, scoped for shadowing. */
+  const readPersonaDir = async (
+    dir: string,
+    scope: LayerScope,
+  ): Promise<{ readonly fragments: readonly PersonaFragment[], readonly issues: readonly string[] }> => {
+    const info = await statAt(dir)
+    const entries = info?.type === 'directory' ? await listAt(dir) : []
+    const fragments: PersonaFragment[] = []
+    const issues: string[] = []
+    for (const entry of entries) {
+      if (entry.type !== 'file') continue
+      if (entry.name.startsWith('.') || !entry.name.toLowerCase().endsWith('.md')) continue
+      const raw = await readAt(join(dir, entry.name))
+      if (raw === undefined) continue
+      const parsed = parsePersonaFragment(scope, entry.name.slice(0, -3), raw)
+      if (parsed.issue !== undefined) issues.push(parsed.issue)
+      if (parsed.fragment !== undefined) fragments.push(parsed.fragment)
+    }
+    return { fragments: sortPersona(fragments), issues }
+  }
+
+  /** Read one workspace's persona fragments into the cache. */
+  const loadPersona = async (workspace: string): Promise<WorkspacePersonaState> => {
+    const read = await readPersonaDir(workspaceLayerDir(workspace, 'persona'), 'workspace')
+    for (const issue of read.issues) ctx.logger.warn(issue)
+    const state: WorkspacePersonaState = { fragments: read.fragments, issues: read.issues }
+    personaCache.set(workspace, state)
+    return state
+  }
+
+  /** Read one workspace's mood state into the cache; `null` records "absent". */
+  const loadMood = async (workspace: string): Promise<MoodState | null> => {
+    const dir = workspaceLayerDir(workspace, 'mood')
+    const raw = await readAt(join(dir, MOOD_FILE_NAME))
+    const parsed: { state?: MoodState, issue?: string } = raw === undefined ? {} : parseMoodDocument(raw)
+    if (parsed.issue !== undefined) ctx.logger.warn(`${toPosix(dir)}: ${parsed.issue}`)
+    const state = parsed.state ?? null
+    moodCache.set(workspace, state)
+    return state
+  }
+
+  /** Probe the single global memory store into the cache. */
+  const loadGlobalMemory = async (): Promise<MemoryStoreState> => {
+    const { state } = await storeOf(globalLayerDir(globalRoot, 'memory'), 'auto')
+    globalCache.memory = state
+    return state
+  }
+
+  /** Read every global rule book into the cache. */
+  const loadGlobalRules = async (): Promise<readonly RuleDefinition[]> => {
+    const dir = globalLayerDir(globalRoot, 'rules')
+    const info = await statAt(dir)
+    const entries = info?.type === 'directory' ? await listAt(dir) : []
+    const rules: RuleDefinition[] = []
+    for (const entry of entries) {
+      if (entry.type !== 'file') continue
+      if (entry.name.startsWith('.') || !entry.name.toLowerCase().endsWith('.md')) continue
+      const source = await readAt(join(dir, entry.name))
+      if (source === undefined) continue
+      rules.push(parseRule(entry.name, source))
+    }
+    rules.sort((left, right) => left.file.localeCompare(right.file))
+    globalCache.rules = rules
+    return rules
+  }
+
+  /** Read the global persona fragments into the cache. */
+  const loadGlobalPersona = async (): Promise<readonly PersonaFragment[]> => {
+    const read = await readPersonaDir(globalLayerDir(globalRoot, 'persona'), 'global')
+    for (const issue of read.issues) ctx.logger.warn(issue)
+    globalCache.persona = read.fragments
+    return read.fragments
+  }
+
+  /** Read the global mood state into the cache; `null` records "absent". */
+  const loadGlobalMood = async (): Promise<MoodState | null> => {
+    const dir = globalLayerDir(globalRoot, 'mood')
+    const raw = await readAt(join(dir, MOOD_FILE_NAME))
+    const parsed: { state?: MoodState, issue?: string } = raw === undefined ? {} : parseMoodDocument(raw)
+    if (parsed.issue !== undefined) ctx.logger.warn(`${toPosix(dir)}: ${parsed.issue}`)
+    const state = parsed.state ?? null
+    globalCache.mood = state
+    return state
+  }
+
+  /**
+   * Reload the whole global scope.
+   *
+   * Global layers are process-wide, so they are read once and then only on a
+   * write that could have changed them — not on every workspace probe.
+   */
+  const refreshGlobal = (): void => {
+    void loadGlobalMemory().catch(() => undefined)
+    void loadGlobalRules().catch(() => undefined)
+    void loadGlobalPersona().catch(() => undefined)
+    void loadGlobalMood().catch(() => undefined)
+  }
+
+  /** Load the global scope the first time any workspace is probed. */
+  const ensureGlobal = (): void => {
+    if (globalCache.memory === undefined) refreshGlobal()
+  }
+
   const refresh = (workspace: string | undefined): void => {
     if (workspace === undefined) return
     void loadState(workspace).catch(() => undefined)
     void loadRules(workspace).catch(() => undefined)
+    void loadPersona(workspace).catch(() => undefined)
+    void loadMood(workspace).catch(() => undefined)
+    ensureGlobal()
     // `configFor`, not `loadConfig`: this is the live provider path, so it is the
     // one that seeds a missing starter file and revalidates a changed one.
     void configFor(workspace).catch(() => undefined)
@@ -486,9 +776,15 @@ export function apply(ctx: Context, config: Config): void {
     workspace === undefined ? undefined : configCache.get(workspace)?.config
 
   /** The verdict on one layer, from the cache only. */
-  const layerOn = (workspace: string | undefined, layer: 'rules' | 'skills'): boolean => {
+  const layerOn = (workspace: string | undefined, layer: 'rules' | 'skills' | 'persona' | 'mood'): boolean => {
     const cached = cachedConfig(workspace)
     return cached === undefined ? DEFAULT_LAYERS[layer] : cached.layers[layer]
+  }
+
+  /** Whether one layer may also read the global scope, from the cache only. */
+  const inheritOn = (workspace: string | undefined, layer: 'persona' | 'mood' | 'memory' | 'rules'): boolean => {
+    const cached = cachedConfig(workspace)
+    return cached === undefined ? true : cached.layers.inherit[layer]
   }
 
   /**
@@ -501,17 +797,18 @@ export function apply(ctx: Context, config: Config): void {
    * reported here in full, because in that state every layer is refused and the
    * prompt is empty — this message is then the only place the reason appears.
    */
-  const refuseLayer = async (workspace: string, layer: 'memory' | 'rules' | 'skills'): Promise<JsonValue | undefined> => {
+  const refuseLayer = async (workspace: string, layer: 'memory' | 'rules' | 'skills' | 'persona' | 'mood'): Promise<JsonValue | undefined> => {
     const config = await configFor(workspace)
     const off = layer === 'memory' ? config.layers.memory === 'disabled' : config.layers[layer] === false
     if (!off) return undefined
 
+    const label = layer === 'persona' ? 'persona（人格）' : layer === 'mood' ? 'mood（情绪）' : layer
     const issues = config.issues.map((issue) => (issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message))
     return {
       ok: false,
       error: issues.length > 0
-        ? `${WORKSPACE_CONFIG_REL} 有配置错误，三层已全部停用：${issues.join('; ')}`
-        : `${layer} 层在本工作区已禁用（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.${layer}）`,
+        ? `${WORKSPACE_CONFIG_REL} 有配置错误，所有层已全部停用：${issues.join('; ')}`
+        : `${label} 层在本工作区已禁用（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.${layer}）`,
       configFile: config.rel,
       configIssues: issues,
     } as unknown as JsonValue
@@ -606,6 +903,94 @@ export function apply(ctx: Context, config: Config): void {
     return lines.join('\n')
   }
 
+  /**
+   * The freshest mood state this workspace may see.
+   *
+   * Moods are not blended: a two-minute-old project state and a week-old global
+   * one are not the same kind of signal, and averaging them would invent a state
+   * nobody wrote. The newest wins, and a state whose `updated` cannot be parsed
+   * never wins over one that can.
+   */
+  const effectiveMood = (workspace: string, now: Date): MoodState | undefined => {
+    const candidates: MoodState[] = []
+    const local = moodCache.get(workspace)
+    if (local !== undefined && local !== null) candidates.push(local)
+    if (inheritOn(workspace, 'mood')) {
+      const shared = globalCache.mood
+      if (shared !== undefined && shared !== null) candidates.push(shared)
+    }
+    let best: MoodState | undefined
+    let bestAge = Number.POSITIVE_INFINITY
+    for (const candidate of candidates) {
+      const view = moodView(candidate, now, { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours })
+      if (view.ageHours < bestAge) {
+        bestAge = view.ageHours
+        best = candidate
+      }
+    }
+    return best
+  }
+
+  /** Render the global memory index section from a cached snapshot. Total: it never throws. */
+  const renderGlobalMemory = (state: MemoryStoreState): string => {
+    const lines = [
+      '# 全局记忆（跨工作区，所有工作区共享）',
+      '',
+      `- 目录：${toPosix(state.dir)}`,
+      `- 索引：${toPosix(state.index)}（${String(state.bytes)} 字节）`,
+      `- 日期流水：${state.ledgers.length > 0
+        ? state.ledgers.slice(0, 3).map((file) => file.rel).join(', ')
+          + (state.ledgers.length > 3 ? ` 等共 ${String(state.ledgers.length)} 个` : '')
+        : '无'}`,
+      '- 写入更严：只记跨工作区稳定的事实（偏好、约定、决策、硬约束）；某个项目的一次性发现留在工作区记忆。',
+      '- 工具：memory_read / memory_search / memory_write / memory_promote 均支持 scope="global"。',
+      '',
+      '当前索引原文',
+      '',
+    ]
+    if (state.hasIndex && state.indexText.length > 0) {
+      const body = normalizeText(state.indexText)
+      lines.push(body.length > globalIndexPromptBytes
+        ? `${body.slice(0, globalIndexPromptBytes)}\n\n…（全局索引过长已截断，完整内容用 memory_read(scope="global")）`
+        : body)
+    } else {
+      lines.push('（暂无全局记忆。跨工作区稳定的事实可用 memory_write(scope="global") 写入。）')
+    }
+    return lines.join('\n')
+  }
+
+  /** Normalize a tool's optional `scope` argument. */
+  const scopeArg = (value: unknown, fallback: 'workspace' | 'global' | 'both'): 'workspace' | 'global' | 'both' =>
+    value === 'workspace' || value === 'global' || value === 'both' ? value : fallback
+
+  /**
+   * Refuse a global-scope call when this workspace blocks the global memory layer.
+   *
+   * Blocking is deliberately transitive: a workspace that set `inherit.memory:
+   * false` does not want cross-workspace facts in its context, and letting a tool
+   * call read them anyway would make the switch cosmetic.
+   */
+  const globalGate = async (workspace: string, write: boolean): Promise<JsonValue | undefined> => {
+    const config = await configFor(workspace)
+    if (config.layers.memory === 'disabled') return refuseLayer(workspace, 'memory')
+    if (!config.layers.inherit.memory) {
+      return {
+        ok: false,
+        error: `本工作区屏蔽了全局记忆（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.inherit.memory: false）；如需跨工作区记忆请把它改为 true`,
+        configFile: config.rel,
+      } as unknown as JsonValue
+    }
+    if (write && config.layers.memory !== 'enabled') return refuseWrite(workspace)
+    return undefined
+  }
+
+  /** The store a memory tool reads or writes, resolved per scope. */
+  const storeFor = async (
+    workspace: string,
+    scope: 'workspace' | 'global',
+  ): Promise<MemoryStoreState & { readonly name?: string }> =>
+    scope === 'global' ? await (globalCache.memory ?? loadGlobalMemory()) : await stateFor(workspace)
+
   const jsonOutput = {
     schema: { type: 'json' } as const,
     render: (_args: unknown, value: JsonValue) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
@@ -614,8 +999,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_status',
     description:
-      '报告本会话生效的工作区记忆后端：工作区存在 .workbuddy/memory 时优先兼容该体系，否则使用 DSH 默认的 .dsh/memory。'
-      + '返回解析出的路径、索引大小，以及日期流水的存放布局与本机计算机名。',
+      '报告本会话生效的记忆：工作区后端（存在 .workbuddy/memory 时优先兼容，否则 .dsh/memory）与全局作用域（$DSH_HOME/memory，跨工作区共享）。'
+      + '返回两者的路径、索引大小、日期流水布局、本机计算机名，以及本工作区的继承开关。',
     parameters: {},
     output: jsonOutput,
     async execute(): Promise<JsonValue> {
@@ -624,6 +1009,9 @@ export function apply(ctx: Context, config: Config): void {
       const refused = await refuseLayer(workspace, 'memory')
       if (refused !== undefined) return refused
       const state = await stateFor(workspace)
+      const shared = globalCache.memory ?? await loadGlobalMemory()
+      const config = await configFor(workspace)
+      const inherited = config.layers.inherit.memory
       return {
         ok: true,
         workspace: toPosix(workspace),
@@ -639,9 +1027,21 @@ export function apply(ctx: Context, config: Config): void {
         ledgerDir: toPosix(join(state.dir, state.hostDir)),
         ledgers: state.ledgers.map((f) => f.rel),
         candidates: state.candidates,
-        writable: isMemoryWritable(cachedConfig(workspace)?.layers.memory ?? DEFAULT_LAYERS.memory),
+        writable: isMemoryWritable(config.layers.memory),
         config: configSummary(workspace),
-        globalScope: '未实现（接口已预留）',
+        global: {
+          root: toPosix(globalRoot),
+          memoryDir: toPosix(shared.dir),
+          indexPath: toPosix(shared.index),
+          indexExists: shared.hasIndex,
+          indexBytes: shared.bytes,
+          ledgerLayout: shared.layout,
+          ledgers: shared.ledgers.map((f) => f.rel),
+          inherited,
+          note: inherited
+            ? '全局记忆会注入本会话（有内容时）；写全局用 memory_write(scope="global")'
+            : '本工作区屏蔽了全局记忆（inherit.memory: false）',
+        },
       } as unknown as JsonValue
     },
   }))
@@ -649,10 +1049,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_read',
     description:
-      '读取工作区记忆。layer=index 返回索引 MEMORY.md —— 硬约束、稳定偏好与文档指针；'
-      + 'layer=ledger 返回某一天的流水文件，默认今天。日期文件可能平铺在记忆目录下，也可能按计算机名放在子目录里，本工具会按目录实际形状定位。',
+      '读取记忆。layer=index 返回索引 MEMORY.md —— 硬约束、稳定偏好与文档指针；layer=ledger 返回某一天的流水文件，默认今天。'
+      + 'scope=workspace（默认）读本工作区，scope=global 读跨工作区的全局记忆。日期文件可能平铺在记忆目录下，也可能按计算机名放在子目录里，本工具会按目录实际形状定位。',
     parameters: {
       layer: { type: 'string' as const, enum: ['index', 'ledger'], description: 'index = 索引 MEMORY.md；ledger = 某一天的日期流水' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享的全局记忆' },
       date: { type: 'string' as const, description: 'layer=ledger 的日期 YYYY-MM-DD，默认今天' },
       limit: { type: 'number' as const, description: '读取流水时返回的最大尾部行数，默认 200' },
     },
@@ -660,9 +1061,10 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const refused = await refuseLayer(workspace, 'memory')
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      const refused = scope === 'global' ? await globalGate(workspace, false) : await refuseLayer(workspace, 'memory')
       if (refused !== undefined) return refused
-      const state = await stateFor(workspace)
+      const state = await storeFor(workspace, scope)
       const ledgers = state.ledgers.map((f) => f.rel)
 
       if (args.layer === 'ledger') {
@@ -670,13 +1072,14 @@ export function apply(ctx: Context, config: Config): void {
         const path = join(state.dir, ledgerForDate(state, date)?.rel ?? ledgerWritePath(state, date))
         const content = await readAt(path)
         if (content === undefined) {
-          return { ok: true, layer: 'ledger', date, path: toPosix(path), exists: false, text: '', ledgers } as unknown as JsonValue
+          return { ok: true, scope, layer: 'ledger', date, path: toPosix(path), exists: false, text: '', ledgers } as unknown as JsonValue
         }
         const cap = args.limit !== undefined && args.limit > 0 ? Math.min(args.limit, 400) : 200
         const lines = normalizeText(content).split('\n')
         const truncated = lines.length > cap
         return {
           ok: true,
+          scope,
           layer: 'ledger',
           date,
           path: toPosix(path),
@@ -690,6 +1093,7 @@ export function apply(ctx: Context, config: Config): void {
 
       return {
         ok: true,
+        scope,
         layer: 'index',
         path: toPosix(state.index),
         exists: state.hasIndex,
@@ -704,41 +1108,73 @@ export function apply(ctx: Context, config: Config): void {
     name: 'memory_search',
     description:
       '在索引与全部日期流水中做大小写不敏感的字面子串检索（含按计算机名分目录存放的流水）。'
+      + 'scope 默认 both：同时搜工作区与全局记忆（全局被本工作区屏蔽时只搜工作区）。'
       + '写入新记忆前先检索，避免重复记录已有的事实。',
-    parameters: { query: { type: 'string' as const, required: true, description: '要查找的字面文本' } },
+    parameters: {
+      query: { type: 'string' as const, required: true, description: '要查找的字面文本' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global', 'both'], description: 'workspace = 只搜本工作区；global = 只搜全局；both = 两者（默认）' },
+    },
     output: jsonOutput,
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const refused = await refuseLayer(workspace, 'memory')
-      if (refused !== undefined) return refused
-      const state = await stateFor(workspace)
+      const requested = scopeArg(args.scope, 'both')
+      const config = await configFor(workspace)
+      const includeWorkspace = requested !== 'global'
+      const includeGlobal = requested !== 'workspace'
+        && config.layers.memory !== 'disabled'
+        && config.layers.inherit.memory
+      if (!includeWorkspace && !includeGlobal) {
+        const refused = await refuseLayer(workspace, 'memory')
+        if (refused !== undefined) return refused
+        return { ok: false, error: '本工作区屏蔽了全局记忆，且请求只搜索全局' } as unknown as JsonValue
+      }
+      if (includeWorkspace) {
+        const refused = await refuseLayer(workspace, 'memory')
+        if (refused !== undefined) return refused
+      }
       const query = normalizeText(args.query)
       if (query.length === 0) return { ok: false, error: 'query 不能为空' } as unknown as JsonValue
 
       const needle = query.toLowerCase()
-      const ledgerFiles = state.ledgers.map((f) => f.rel)
-      const files = state.hasIndex ? [INDEX_FILE, ...ledgerFiles] : ledgerFiles
-      const hits: { file: string, line: number, text: string }[] = []
-      for (const file of files) {
-        const content = await readAt(join(state.dir, file))
-        if (content === undefined) continue
-        normalizeText(content).split('\n').forEach((line, i) => {
-          if (line.toLowerCase().includes(needle)) hits.push({ file, line: i + 1, text: line.trim().slice(0, 240) })
-        })
+      const hits: { scope: 'workspace' | 'global', file: string, line: number, text: string }[] = []
+      const search = async (store: MemoryStoreState, scope: 'workspace' | 'global'): Promise<void> => {
+        const ledgerFiles = store.ledgers.map((f) => f.rel)
+        const files = store.hasIndex ? [INDEX_FILE, ...ledgerFiles] : ledgerFiles
+        for (const file of files) {
+          const content = await readAt(join(store.dir, file))
+          if (content === undefined) continue
+          normalizeText(content).split('\n').forEach((line, i) => {
+            if (line.toLowerCase().includes(needle)) hits.push({ scope, file, line: i + 1, text: line.trim().slice(0, 240) })
+          })
+        }
       }
-      return { ok: true, query, backend: state.name, totalHits: hits.length, hits: hits.slice(0, 120) } as unknown as JsonValue
+      if (includeWorkspace) await search(await stateFor(workspace), 'workspace')
+      if (includeGlobal) await search(globalCache.memory ?? await loadGlobalMemory(), 'global')
+      return {
+        ok: true,
+        query,
+        searched: { workspace: includeWorkspace, global: includeGlobal },
+        totalHits: hits.length,
+        hits: hits.slice(0, 120),
+      } as unknown as JsonValue
     },
   }))
 
+  /** Entry kinds that may enter the GLOBAL ledger; project-local facts stay in the workspace. */
+  const GLOBAL_ENTRY_KINDS: readonly string[] = ['preference', 'constraint', 'convention', 'decision']
+
   ctx.tools.register(defineTool({
-    name: 'memory_write',    description:
+    name: 'memory_write',
+    description:
       '经准入审查后，向日期流水追加一条跨会话仍有价值的记忆：决策及其理由、稳定偏好、约定、可复现的坑、环境限制、硬约束。'
       + '绝不记录密钥、一次性改动或排错流水账；读起来像流水账的条目会被拒绝，除非 force=true。'
+      + 'scope=workspace（默认）写本工作区；scope=global 写跨工作区共享的全局记忆，写入会对所有工作区可见，且 kind 只接受 preference/constraint/convention/decision。'
       + '写入位置遵循记忆目录的实际布局：平铺时写 memory/YYYY-MM-DD.md，按计算机名分目录时写 memory/<本机计算机名>/YYYY-MM-DD.md。',
     parameters: {
       content: { type: 'string' as const, required: true, description: '持久的事实、决策、约定或坑本身' },
       kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '条目分类，默认 fact' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享' },
       title: { type: 'string' as const, description: '内容较长时的单行标题（可选）' },
       tags: { type: 'array' as const, items: { type: 'string' as const }, description: '标签（可选）' },
       force: { type: 'boolean' as const, description: '带软性提醒仍写入；无法绕过硬性拒绝' },
@@ -748,18 +1184,29 @@ export function apply(ctx: Context, config: Config): void {
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const refused = await refuseWrite(workspace)
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      const refused = scope === 'global' ? await globalGate(workspace, true) : await refuseWrite(workspace)
       if (refused !== undefined) return refused
-      const state = await stateFor(workspace)
+      const state = await storeFor(workspace, scope)
       const verdict = evaluateEntry(args.content, args.kind)
 
       if (!verdict.allowed) {
-        return { ok: false, written: false, kind: verdict.kind, reasons: verdict.reasons, warnings: verdict.warnings } as unknown as JsonValue
+        return { ok: false, written: false, scope, kind: verdict.kind, reasons: verdict.reasons, warnings: verdict.warnings } as unknown as JsonValue
+      }
+      if (scope === 'global' && !GLOBAL_ENTRY_KINDS.includes(verdict.kind)) {
+        return {
+          ok: false,
+          written: false,
+          scope,
+          kind: verdict.kind,
+          error: `全局记忆只接受 ${GLOBAL_ENTRY_KINDS.join('/')} 四类结论；${verdict.kind} 类事实通常只对一个项目成立，请改用 scope="workspace"`,
+        } as unknown as JsonValue
       }
       if (verdict.warnings.length > 0 && args.force !== true) {
         return {
           ok: false,
           written: false,
+          scope,
           kind: verdict.kind,
           warnings: verdict.warnings,
           needsForce: true,
@@ -774,7 +1221,7 @@ export function apply(ctx: Context, config: Config): void {
       const block = renderEntry({
         content: verdict.body,
         kind: verdict.kind,
-        scope: 'workspace',
+        scope,
         ...args.title !== undefined ? { title: args.title } : {},
         ...args.tags !== undefined ? { tags: args.tags } : {},
       })
@@ -782,12 +1229,31 @@ export function apply(ctx: Context, config: Config): void {
         ? `# ${date}\n\n${block}\n`
         : `${normalizeText(existing).replace(/\s+$/, '')}\n\n${block}\n`
 
-      const written = await writeAt(path, next, currentSession())
+      let written: string
+      try {
+        written = await writeAt(path, next, currentSession())
+      } catch (error) {
+        // A global write lands outside the workspace, which the workspace-write
+        // sandbox policy refuses. Report the policy as the cause instead of a bare
+        // stack: the caller's remedy is to write a workspace entry or widen policy.
+        return {
+          ok: false,
+          written: false,
+          scope,
+          path: toPosix(path),
+          error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+          hint: scope === 'global'
+            ? '全局记忆在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外的路径；可改用 scope="workspace"，或在允许该路径的策略下运行'
+            : '当前策略不允许写该路径',
+        } as unknown as JsonValue
+      }
+      if (scope === 'global') refreshGlobal()
       refresh(workspace)
       return {
         ok: true,
         written: true,
-        backend: state.name,
+        scope,
+        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : { backend: state.name ?? 'dsh-default' },
         path: written,
         date,
         ledgerLayout: state.layout,
@@ -802,34 +1268,45 @@ export function apply(ctx: Context, config: Config): void {
     name: 'memory_promote',
     description:
       '把一行提升进索引 MEMORY.md 的指定章节，使其每轮都注入上下文。此层只留给硬约束、稳定偏好、长期约定与文档指针，'
-      + '不放细节、现状或流水账。已有章节原样保留；重复条目幂等。',
+      + '不放细节、现状或流水账。scope=global 时提升进全局索引（对所有工作区生效）。已有章节原样保留；重复条目幂等。',
     parameters: {
       entry: { type: 'string' as const, required: true, description: '要加入索引的单行条目' },
       section: { type: 'string' as const, description: '目标章节标题；同名章节保持原位，缺失则新建' },
       kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '用于准入审查的分类' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区索引（默认）；global = 跨工作区全局索引' },
     },
     output: jsonOutput,
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const refused = await refuseWrite(workspace)
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      const refused = scope === 'global' ? await globalGate(workspace, true) : await refuseWrite(workspace)
       if (refused !== undefined) return refused
-      const state = await stateFor(workspace)
+      const state = await storeFor(workspace, scope)
       const entry = normalizeText(args.entry)
       if (entry.length === 0) return { ok: false, changed: false, error: '提升内容不能为空' } as unknown as JsonValue
 
       const verdict = evaluateEntry(entry, args.kind)
-      if (!verdict.allowed) return { ok: false, changed: false, reasons: verdict.reasons } as unknown as JsonValue
+      if (!verdict.allowed) return { ok: false, changed: false, scope, reasons: verdict.reasons } as unknown as JsonValue
 
       const section = normalizeText(args.section) || '未分类'
       const base = state.hasIndex && state.indexText.length > 0 ? state.indexText : `# ${section}\n\n`
       const result = upsertIndexEntry(base, section, entry)
       if (!result.changed) {
-        return { ok: true, changed: false, path: toPosix(state.index), section } as unknown as JsonValue
+        return { ok: true, changed: false, scope, path: toPosix(state.index), section } as unknown as JsonValue
       }
       const written = await writeAt(state.index, result.text, currentSession())
+      if (scope === 'global') refreshGlobal()
       refresh(workspace)
-      return { ok: true, changed: true, backend: state.name, path: written, section, createdSection: result.createdSection } as unknown as JsonValue
+      return {
+        ok: true,
+        changed: true,
+        scope,
+        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : { backend: state.name ?? 'dsh-default' },
+        path: written,
+        section,
+        createdSection: result.createdSection,
+      } as unknown as JsonValue
     },
   }))
 
@@ -851,6 +1328,14 @@ export function apply(ctx: Context, config: Config): void {
         backend: state.name,
         mode: state.compat ? 'workbuddy' : 'dsh-default',
         memoryDir: toPosix(state.dir),
+        global: {
+          root: toPosix(globalRoot),
+          memoryDir: toPosix(globalCache.memory?.dir ?? globalLayerDir(globalRoot, 'memory')),
+          inherited: (await configFor(workspace)).layers.inherit.memory,
+          writeKinds: GLOBAL_ENTRY_KINDS,
+          note: '全局记忆跨工作区共享；写它用 memory_write(scope="global")，只有 preference/constraint/convention/decision 四类可写，'
+            + '某个项目的一次性发现应留在工作区记忆。',
+        },
         host: state.host,
         ledgerLayout: state.layout,
         ledgerDir: toPosix(join(state.dir, state.hostDir)),
@@ -894,6 +1379,18 @@ export function apply(ctx: Context, config: Config): void {
       if (refused !== undefined) return refused
       const state = await rulesFor(workspace)
       const active = triggered.get(workspace) ?? EMPTY_RULES
+      const shared = globalCache.rules ?? await loadGlobalRules()
+      const sharedActive = globalTriggered.get(workspace) ?? EMPTY_RULES
+      const config = await configFor(workspace)
+      const describeBook = (rule: RuleDefinition, hit: ReadonlySet<string>) => ({
+        file: rule.file,
+        title: rule.title,
+        kind: rule.alwaysApply ? 'always' : rule.paths.length > 0 ? 'conditional' : 'on-demand',
+        paths: rule.paths,
+        bytes: rule.bytes,
+        triggered: hit.has(rule.rel),
+        issue: rule.issue,
+      })
       return {
         ok: true,
         workspace: toPosix(workspace),
@@ -903,15 +1400,15 @@ export function apply(ctx: Context, config: Config): void {
         budgets: { rulesPromptBytes, ruleFileBytes },
         config: configSummary(workspace),
         total: state.rules.length,
-        books: state.rules.map((rule) => ({
-          file: rule.file,
-          title: rule.title,
-          kind: rule.alwaysApply ? 'always' : rule.paths.length > 0 ? 'conditional' : 'on-demand',
-          paths: rule.paths,
-          bytes: rule.bytes,
-          triggered: active.has(rule.rel),
-          issue: rule.issue,
-        })),
+        books: state.rules.map((rule) => describeBook(rule, active)),
+        global: {
+          dir: toPosix(globalLayerDir(globalRoot, 'rules')),
+          inherited: config.layers.inherit.rules,
+          budgets: { rulesPromptBytes: globalRulesPromptBytes, ruleFileBytes },
+          total: shared.length,
+          books: shared.map((rule) => describeBook(rule, sharedActive)),
+          note: '全局规则对每个工作区都生效；条件册只按本工作区的文件触碰触发。',
+        },
         note: '条件册只按「读/写/编辑匹配文件」触发；用 shell 改文件不会触发（DSH 的触碰追踪只认这三个工具的 file_path 参数）。',
       } as unknown as JsonValue
     },
@@ -920,29 +1417,52 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'rule_read',
     description:
-      '读取一册工作区规则的完整正文（绕过 16 KB 注入上限）。用于按需规则、未被预算注入的条件册，'
-      + '以及新建文件前的兜底——新建文件不一定触发条件册注入。',
-    parameters: { file: { type: 'string' as const, required: true, description: '册文件名或工作区相对路径，例如 01-协作红线.md' } },
+      '读取一册规则的完整正文（绕过 16 KB 注入上限）。用于按需规则、未被预算注入的条件册，'
+      + '以及新建文件前的兜底——新建文件不一定触发条件册注入。scope=global 读跨工作区的全局规则。',
+    parameters: {
+      file: { type: 'string' as const, required: true, description: '册文件名或工作区相对路径，例如 01-协作红线.md' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区的全局规则' },
+    },
     output: jsonOutput,
     async execute(args): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const refused = await refuseLayer(workspace, 'rules')
-      if (refused !== undefined) return refused
-      const state = await rulesFor(workspace)
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      let dirRel: string
+      let rules: readonly RuleDefinition[]
+      if (scope === 'global') {
+        const config = await configFor(workspace)
+        if (!config.layers.inherit.rules) {
+          return {
+            ok: false,
+            error: `本工作区屏蔽了全局规则（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.inherit.rules: false）`,
+            configFile: config.rel,
+          } as unknown as JsonValue
+        }
+        dirRel = toPosix(globalLayerDir(globalRoot, 'rules'))
+        rules = globalCache.rules ?? await loadGlobalRules()
+      } else {
+        const refused = await refuseLayer(workspace, 'rules')
+        if (refused !== undefined) return refused
+        const state = await rulesFor(workspace)
+        dirRel = state.dirRel
+        rules = state.rules
+      }
       const query = normalizeText(args.file).replace(/^\.\//, '')
-      const byRel = state.rules.find((rule) => rule.rel === query || rule.rel === `${state.dirRel}/${query}`)
-      const byName = state.rules.find((rule) => rule.file === query)
+      const byRel = rules.find((rule) => rule.rel === query || rule.rel === `${dirRel}/${query}`)
+      const byName = rules.find((rule) => rule.file === query)
       const rule = byRel ?? byName
       if (rule === undefined) {
         return {
           ok: false,
+          scope,
           error: `未找到规则册：${query}`,
-          available: state.rules.map((r) => r.file),
+          available: rules.map((r) => r.file),
         } as unknown as JsonValue
       }
       return {
         ok: true,
+        scope,
         file: rule.file,
         path: rule.rel,
         title: rule.title,
@@ -954,6 +1474,420 @@ export function apply(ctx: Context, config: Config): void {
       } as unknown as JsonValue
     },
   }))
+
+  ctx.tools.register(defineTool({
+    name: 'self_status',
+    description:
+      '报告「自我层」全景：persona（人格）、mood（情绪）、rules（规则）、memory（记忆）四层在两个作用域（工作区 / 全局）下的目录、文件数、字节、'
+      + '注入预算、继承开关、情绪衰减结果与阻塞原因。排查「为什么某层没生效」先看这里。',
+    parameters: {},
+    output: jsonOutput,
+    async execute(): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const config = await configFor(workspace)
+      const localPersona = await loadPersona(workspace)
+      const sharedPersona = globalCache.persona ?? await loadGlobalPersona()
+      const localMood = moodCache.get(workspace) ?? await loadMood(workspace)
+      const sharedMood = globalCache.mood === undefined ? await loadGlobalMood() : globalCache.mood
+      const localRules = await rulesFor(workspace)
+      const sharedRules = globalCache.rules ?? await loadGlobalRules()
+      const localMemory = await stateFor(workspace)
+      const sharedMemory = globalCache.memory ?? await loadGlobalMemory()
+      const now = new Date()
+      const decay = { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours }
+      const describeMood = (state: MoodState | null): JsonValue => {
+        if (state === null) return { present: false } as unknown as JsonValue
+        const view = moodView(state, now, decay)
+        return {
+          present: true,
+          label: state.label,
+          updated: state.updated ?? null,
+          ageHours: Number.isFinite(view.ageHours) ? Math.round(view.ageHours * 10) / 10 : null,
+          weight: Math.round(view.weight * 100) / 100,
+          fresh: view.fresh,
+          text: view.text,
+        } as unknown as JsonValue
+      }
+      const effective = effectiveMood(workspace, now)
+      return {
+        ok: true,
+        workspace: toPosix(workspace),
+        globalRoot: toPosix(globalRoot),
+        config: configSummary(workspace),
+        layers: {
+          persona: {
+            enabled: config.layers.persona,
+            inherited: config.layers.inherit.persona,
+            budgetBytes: personaPromptBytes,
+            fileBytes: personaFileBytes,
+            workspace: {
+              dir: toPosix(workspaceLayerDir(workspace, 'persona')),
+              fragments: localPersona.fragments.map((f) => ({ name: f.name, title: f.title, bytes: f.bytes, order: f.order })),
+              issues: localPersona.issues,
+            },
+            global: {
+              dir: toPosix(globalLayerDir(globalRoot, 'persona')),
+              fragments: sharedPersona.map((f) => ({ name: f.name, title: f.title, bytes: f.bytes, order: f.order })),
+              shadowedByWorkspace: mergePersona(sharedPersona, localPersona.fragments).shadowed.map((f) => f.name),
+            },
+          },
+          mood: {
+            enabled: config.layers.mood,
+            inherited: config.layers.inherit.mood,
+            budgetBytes: moodPromptBytes,
+            halfLifeHours: moodHalfLifeHours,
+            maxAgeHours: moodMaxAgeHours,
+            workspace: { dir: toPosix(workspaceLayerDir(workspace, 'mood')), ...describeMood(localMood) as object },
+            global: { dir: toPosix(globalLayerDir(globalRoot, 'mood')), ...describeMood(sharedMood) as object },
+            effective: effective === undefined ? null : { label: effective.label, updated: effective.updated ?? null },
+          },
+          rules: {
+            enabled: config.layers.rules,
+            inherited: config.layers.inherit.rules,
+            budgets: { workspace: rulesPromptBytes, global: globalRulesPromptBytes, file: ruleFileBytes },
+            workspace: { dir: localRules.dirRel, exists: localRules.exists, total: localRules.rules.length },
+            global: { dir: toPosix(globalLayerDir(globalRoot, 'rules')), total: sharedRules.length },
+          },
+          memory: {
+            mode: config.layers.memory,
+            inherited: config.layers.inherit.memory,
+            budgets: { workspace: indexPromptBytes, global: globalIndexPromptBytes },
+            workspace: {
+              backend: localMemory.name,
+              dir: toPosix(localMemory.dir),
+              indexBytes: localMemory.bytes,
+              ledgers: localMemory.ledgers.length,
+            },
+            global: {
+              dir: toPosix(sharedMemory.dir),
+              indexBytes: sharedMemory.bytes,
+              ledgers: sharedMemory.ledgers.length,
+              configured: sharedMemory.hasIndex || sharedMemory.ledgers.length > 0,
+            },
+          },
+          skills: { enabled: config.layers.skills, note: '技能只有工作区来源（.workbuddy/skills）；全局技能由 DSH 原生的 $DSH_HOME/skills 提供，本插件不接管。' },
+        },
+        notes: [
+          '全局层位于 $DSH_HOME/{persona,mood,memory,rules}；可用行配置 globalRoot 整体搬家。',
+          '工作区同名 persona 片段会整体遮蔽全局那一份；情绪取「最新一份」而不混合。',
+          '每个工作区可用 .dsh/workspace.yml 的 inherit.{persona,mood,memory,rules} 屏蔽对应全局层。',
+        ],
+      } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'persona_read',
+    description:
+      '读取人格片段。省略 name 时返回两个作用域的片段清单；给出 name 时返回正文（工作区同名遮蔽全局，返回的就是生效的那一份）。',
+    parameters: {
+      name: { type: 'string' as const, description: '片段名（不含 .md）；省略则只列清单' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global', 'both'], description: 'workspace / global / both（默认 both）' },
+    },
+    output: jsonOutput,
+    async execute(args): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const scope = scopeArg(args.scope, 'both')
+      const config = await configFor(workspace)
+      const local = config.layers.persona ? await loadPersona(workspace) : { fragments: [], issues: [] }
+      const shared = scope !== 'workspace' && config.layers.inherit.persona
+        ? globalCache.persona ?? await loadGlobalPersona()
+        : []
+      const merged = mergePersona(scope === 'global' ? [] : local.fragments, scope === 'global' ? shared : [])
+      const list = scope === 'global'
+        ? shared
+        : scope === 'workspace'
+          ? local.fragments
+          : mergePersona(shared, local.fragments).fragments
+      const name = args.name === undefined || args.name.trim().length === 0 ? undefined : args.name.trim().replace(/\.md$/i, '')
+      if (name === undefined) {
+        return {
+          ok: true,
+          scope,
+          total: list.length,
+          fragments: list.map((f) => ({ scope: f.scope, name: f.name, title: f.title, order: f.order, bytes: f.bytes })),
+          shadowed: scope === 'both' ? mergePersona(shared, local.fragments).shadowed.map((f) => f.name) : [],
+          issues: local.issues,
+          mergedEffective: merged.fragments.length,
+        } as unknown as JsonValue
+      }
+      const found = list.find((f) => f.name.toLowerCase() === name.toLowerCase())
+      if (found === undefined) {
+        return { ok: false, scope, error: `未找到人格片段：${name}`, available: list.map((f) => f.name) } as unknown as JsonValue
+      }
+      return { ok: true, scope, name: found.name, title: found.title, bytes: found.bytes, body: found.body } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'persona_write',
+    description:
+      '写入人格片段（<scope>/.dsh 或 $DSH_HOME 下的 persona/<name>.md）。人格写身份、语气、价值观与禁忌；'
+      + '项目事实属于记忆，不要写进人格。scope=global 的写入对所有工作区生效。',
+    parameters: {
+      name: { type: 'string' as const, required: true, description: '片段名（不含 .md，如 02-voice）' },
+      content: { type: 'string' as const, required: true, description: '片段正文；可自带 frontmatter（title/order）' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace（默认）或 global' },
+      mode: { type: 'string' as const, enum: ['replace', 'append'], description: 'replace（默认）整体替换；append 追加为新的段落' },
+    },
+    output: jsonOutput,
+    async execute(args): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      const refused = scope === 'global'
+        ? await (async () => {
+            const config = await configFor(workspace)
+            if (!config.layers.persona) return refuseLayer(workspace, 'persona')
+            if (!config.layers.inherit.persona) {
+              return {
+                ok: false,
+                error: `本工作区屏蔽了全局人格（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.inherit.persona: false）`,
+                configFile: config.rel,
+              } as unknown as JsonValue
+            }
+            return undefined
+          })()
+        : await refuseLayer(workspace, 'persona')
+      if (refused !== undefined) return refused
+
+      const raw = args.name.trim().replace(/^.*[\\/]/, '').replace(/\.md$/i, '')
+      if (raw.length === 0 || raw.startsWith('.')) {
+        return { ok: false, written: false, error: '片段名不能为空、不能以点开头' } as unknown as JsonValue
+      }
+      const body = normalizeText(args.content)
+      if (body.length === 0) return { ok: false, written: false, error: '内容不能为空' } as unknown as JsonValue
+      if (Buffer.byteLength(body, 'utf8') > personaFileBytes) {
+        return {
+          ok: false,
+          written: false,
+          error: `片段超过 ${String(personaFileBytes)} 字节上限，请拆分到多个片段（每个片段有自己的标题与预算）`,
+          bytes: Buffer.byteLength(body, 'utf8'),
+        } as unknown as JsonValue
+      }
+      const verdict = evaluateEntry(body, 'fact')
+      if (!verdict.allowed) return { ok: false, written: false, reasons: verdict.reasons } as unknown as JsonValue
+
+      const dir = scope === 'global' ? globalLayerDir(globalRoot, 'persona') : workspaceLayerDir(workspace, 'persona')
+      const path = join(dir, `${raw}.md`)
+      const existing = args.mode === 'append' ? await readAt(path) : undefined
+      const next = existing === undefined || normalizeText(existing).length === 0
+        ? `${body}\n`
+        : `${normalizeText(existing).replace(/\s+$/, '')}\n\n${body}\n`
+      let written: string
+      try {
+        written = await writeAt(path, next, currentSession())
+      } catch (error) {
+        return {
+          ok: false,
+          written: false,
+          scope,
+          error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+          hint: scope === 'global' ? '全局人格在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外' : '当前策略不允许写该路径',
+        } as unknown as JsonValue
+      }
+      if (scope === 'global') await loadGlobalPersona()
+      else await loadPersona(workspace)
+      return { ok: true, written: true, scope, name: raw, path: written, mode: args.mode ?? 'replace', bytes: Buffer.byteLength(next, 'utf8') } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'mood_get',
+    description:
+      '读取当前情绪状态（工作区与全局各一份，含衰减后的强度、年龄与是否已平复）。情绪是一个有时效的小状态，不写历史流水。',
+    parameters: { scope: { type: 'string' as const, enum: ['workspace', 'global', 'both'], description: '默认 both' } },
+    output: jsonOutput,
+    async execute(args): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const scope = scopeArg(args.scope, 'both')
+      const config = await configFor(workspace)
+      const now = new Date()
+      const decay = { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours }
+      const describe = (state: MoodState | null): JsonValue => {
+        if (state === null) return { present: false } as unknown as JsonValue
+        const view = moodView(state, now, decay)
+        return {
+          present: true,
+          label: state.label,
+          valence: state.valence ?? null,
+          arousal: state.arousal ?? null,
+          updated: state.updated ?? null,
+          body: state.body,
+          ageHours: Number.isFinite(view.ageHours) ? Math.round(view.ageHours * 10) / 10 : null,
+          weight: Math.round(view.weight * 100) / 100,
+          fresh: view.fresh,
+          text: view.text,
+        } as unknown as JsonValue
+      }
+      const local = scope === 'global' ? null : moodCache.get(workspace) ?? await loadMood(workspace)
+      const shared = scope === 'workspace' ? null : globalCache.mood === undefined ? await loadGlobalMood() : globalCache.mood
+      const effective = effectiveMood(workspace, now)
+      return {
+        ok: true,
+        scope,
+        decay,
+        effective: effective === undefined ? null : { label: effective.label, updated: effective.updated ?? null },
+        workspace: describe(local),
+        global: { inherited: config.layers.inherit.mood, ...describe(shared) as object },
+        note: '取「最新一份」而不是混合；超过 maxAgeHours 或权重低于 0.05 会被视为已平复。',
+      } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'mood_set',
+    description:
+      '写入当前情绪状态（覆盖 current.md，自动记 updated）。情绪只描述此刻的倾向与唤醒度，不是记忆：需要留档的结论请用 memory_write。',
+    parameters: {
+      label: { type: 'string' as const, required: true, description: '情绪名，如 专注、烦躁、轻松' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace（默认，本项目）/ global（跨工作区整体状态）' },
+      valence: { type: 'number' as const, description: '-1 消极 … +1 积极（可选）' },
+      arousal: { type: 'number' as const, description: '0 平静 … 1 亢奋（可选）' },
+      note: { type: 'string' as const, description: '一两句备注（可选，最多 1024 字节）' },
+    },
+    output: jsonOutput,
+    async execute(args): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
+      const config = await configFor(workspace)
+      if (!config.layers.mood) {
+        const refused = await refuseLayer(workspace, 'mood')
+        if (refused !== undefined) return refused
+      }
+      if (scope === 'global' && !config.layers.inherit.mood) {
+        return {
+          ok: false,
+          error: `本工作区屏蔽了全局情绪（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.inherit.mood: false）`,
+          configFile: config.rel,
+        } as unknown as JsonValue
+      }
+      const now = new Date()
+      let document: string
+      try {
+        document = buildMoodDocument({
+          label: args.label,
+          ...args.valence !== undefined ? { valence: args.valence } : {},
+          ...args.arousal !== undefined ? { arousal: args.arousal } : {},
+          ...args.note !== undefined ? { note: args.note } : {},
+        }, now)
+      } catch (error) {
+        return { ok: false, error: `情绪参数无效：${error instanceof Error ? error.message : String(error)}` } as unknown as JsonValue
+      }
+      const dir = scope === 'global' ? globalLayerDir(globalRoot, 'mood') : workspaceLayerDir(workspace, 'mood')
+      const path = join(dir, MOOD_FILE_NAME)
+      let written: string
+      try {
+        written = await writeAt(path, document, currentSession())
+      } catch (error) {
+        return {
+          ok: false,
+          scope,
+          error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+          hint: scope === 'global' ? '全局情绪在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外' : '当前策略不允许写该路径',
+        } as unknown as JsonValue
+      }
+      const parsed = parseMoodDocument(document)
+      if (scope === 'global') globalCache.mood = parsed.state ?? null
+      else moodCache.set(workspace, parsed.state ?? null)
+      return {
+        ok: true,
+        written: true,
+        scope,
+        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : {},
+        path: written,
+        state: parsed.state === undefined
+          ? { label: args.label }
+          : {
+              label: parsed.state.label,
+              valence: parsed.state.valence ?? null,
+              arousal: parsed.state.arousal ?? null,
+              updated: parsed.state.updated ?? null,
+            },
+      } as unknown as JsonValue
+    },
+  }))
+
+  ctx.effect(() => prompt.context({
+    name: 'workspace-persona',
+    order: 50,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        if (!layerOn(workspace, 'persona')) return ''
+        const local = personaCache.get(workspace)
+        if (local === undefined) {
+          refresh(workspace)
+          return ''
+        }
+        const global = inheritOn(workspace, 'persona') ? globalCache.persona ?? [] : []
+        const merged = mergePersona(global, local.fragments)
+        return renderPersonaSection(merged.fragments, { maxBytes: personaPromptBytes, fileBytes: personaFileBytes }).text
+      } catch { return '' }
+    },
+  }), 'workspace-conventions.persona')
+
+  ctx.effect(() => prompt.context({
+    name: 'workspace-mood',
+    order: 52,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        if (!layerOn(workspace, 'mood')) return ''
+        if (moodCache.get(workspace) === undefined) {
+          refresh(workspace)
+          return ''
+        }
+        const now = new Date()
+        return renderMoodSection(effectiveMood(workspace, now), now, {
+          halfLifeHours: moodHalfLifeHours,
+          maxAgeHours: moodMaxAgeHours,
+          maxBytes: moodPromptBytes,
+          renderQuiet: true,
+        })
+      } catch { return '' }
+    },
+  }), 'workspace-conventions.mood')
+
+  ctx.effect(() => prompt.context({
+    name: 'global-rules',
+    order: 54,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        if (!layerOn(workspace, 'rules') || !inheritOn(workspace, 'rules')) return ''
+        const rules = globalCache.rules
+        if (rules === undefined) {
+          refresh(workspace)
+          return ''
+        }
+        if (rules.length === 0) return ''
+        return renderRulesSection({
+          dir: toPosix(globalLayerDir(globalRoot, 'rules')),
+          rules,
+          active: globalTriggered.get(workspace) ?? EMPTY_RULES,
+          ruleFileBytes,
+          maxBytes: globalRulesPromptBytes,
+        })
+      } catch { return '' }
+    },
+  }), 'workspace-conventions.global-rules')
 
   // The prompt providers are SYNCHRONOUS by contract: `assemble()` calls them
   // without awaiting. Their asynchronous probes feed the caches; these only
@@ -985,6 +1919,32 @@ export function apply(ctx: Context, config: Config): void {
       } catch { return '' }
     },
   }), 'workspace-conventions.rules')
+
+  ctx.effect(() => prompt.context({
+    name: 'global-memory',
+    order: 58,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        const cached = cachedConfig(workspace)
+        if (cached !== undefined && !isMemoryWritable(cached.layers.memory)) return ''
+        if (!inheritOn(workspace, 'memory')) return ''
+        const state = globalCache.memory
+        if (state === undefined) {
+          refresh(workspace)
+          return ''
+        }
+        // An untouched global store must stay invisible: a section that only ever
+        // says "nothing here yet" is pure per-turn token cost.
+        if (!state.hasIndex && state.ledgers.length === 0) return ''
+        return renderGlobalMemory(state)
+      } catch { return '' }
+    },
+  }), 'workspace-conventions.global-memory')
 
   ctx.effect(() => prompt.context({
     name: 'workspace-memory',
@@ -1062,26 +2022,34 @@ export function apply(ctx: Context, config: Config): void {
     if (rel === SKILLS_DIR_REL || rel.startsWith(`${SKILLS_DIR_REL}/`)) invalidateSkills?.()
 
     void (async () => {
-      const state = await rulesFor(workspace)
-      const hits = matchingRules(state.rules, rel)
-      if (hits.length === 0) return
-      let active = triggered.get(workspace)
-      if (active === undefined) {
-        active = new Set()
-        triggered.set(workspace, active)
+      const [state, shared] = await Promise.all([rulesFor(workspace), globalCache.rules ?? loadGlobalRules()])
+      const record = (hits: readonly RuleDefinition[], target: Map<string, Set<string>>): void => {
+        if (hits.length === 0) return
+        let active = target.get(workspace)
+        if (active === undefined) {
+          active = new Set()
+          target.set(workspace, active)
+        }
+        for (const rule of hits) active.add(rule.rel)
       }
-      for (const rule of hits) active.add(rule.rel)
+      record(matchingRules(state.rules, rel), triggered)
+      // Global conditional books trigger on the same workspace-relative touch, but
+      // their activation stays per workspace so one project cannot force another's.
+      record(matchingRules(shared, rel), globalTriggered)
     })().catch(() => undefined)
     return undefined
   })
 
   // Warm the caches for every session this scope serves, so the synchronous
-  // providers have content on the session's first turn.
+  // providers have content on the session's first turn. The global layers are
+  // re-read here too: they are process-wide and nobody watches their files, so a
+  // new session is the moment an edit made outside this process becomes visible.
   const prewarm = (agent: unknown): void => {
     const workspace = workspaceOf(agent)
     const session = sessionOf(agent)
     if (workspace !== undefined && session !== undefined) sessions.set(workspace, session)
     refresh(workspace)
+    refreshGlobal()
   }
   ctx.on('agent/created', (payload: { readonly agent?: unknown }): undefined => { prewarm(payload.agent) })
   prewarm(agentNow())
