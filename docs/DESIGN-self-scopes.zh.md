@@ -191,12 +191,15 @@ workspace-conventions:
 |---|---|---|
 | 50 | `persona`（人格） | `personaPromptBytes`（默认 3072） |
 | 52 | `mood`（情绪） | `moodPromptBytes`（默认 512） |
-| 55 | `workspace-rules`（既有，内含全局册段） | `rulesPromptBytes` / `globalRulesPromptBytes` |
+| 53 | `workspace-mood-maintenance`（情绪维护，0.6.0） | 无独立预算：固定三行 |
+| 54 | `global-rules`（全局规则册） | `globalRulesPromptBytes`（默认 12288） |
+| 55 | `workspace-rules`（既有） | `rulesPromptBytes` |
 | 58 | `global-memory`（全局记忆索引） | `globalIndexPromptBytes`（默认 3072） |
 | 60 | `workspace-memory`（既有） | `indexPromptBytes`（既有 7000） |
 
 - 全部沿用 `systemPrompt.context()`（**同步 provider**）：每作用域每层的文本异步探测进缓存，渲染时同步读缓存；`agent/created` 预热两套作用域。
-- 空目录 → 段落不出现（返回空串），零 token 开销。
+- 空目录 → 段落不出现（返回空串），零 token 开销。0.6.0 的写入审批（`tools/pre-execute`）与情绪维护段落的完整规格见 `DESIGN.zh.md`。
+
 
 ## 8. 全局写入的三个现实约束
 

@@ -46,11 +46,25 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 | | `host` | 新流水写在按计算机名分的子目录里（`memory/<计算机名>/YYYY-MM-DD.md`） |
 | `inherit` | 映射 | 四个键：`persona` / `mood` / `memory` / `rules`，默认全 `true`；`false` = 屏蔽该层的全局来源 |
 
-`inherit` 的语义按层不同：人格与规则是**同名遮蔽**（工作区同名片段/册整体替换全局那份），情绪是**取最新一份**，记忆是**两段独立注入**（`inherit.memory: false` 时才消失）。屏蔽对工具同样生效：`memory_*` / `rule_read` 的 `scope="global"` 会被拒——只掐注入不掐工具，等于让开关变成装饰。
+`inherit` 的语义按层不同：人格与规则是**同名遮蔽**（工作区同名片段/册整体替换全局那份），情绪是**取最新一份**，记忆是**两段独立注入**（`inherit.memory: false` 时才消失）。屏蔽对工具同样生效：`memory_*` / `rule_read` 的 `scope="global"` 会被拒，`persona_write` / `mood_set` 的全局写入同样被拒——只掐注入不掐工具，等于让开关变成装饰。
 
 `memory` 为什么只读时也不注入段落：该段落承载的就是索引正文本身。只读工作区仍可用读工具取到同样内容，每轮再注入一遍只是重复付费。
 
 `memoryLayout` 只管**下一次写到哪里**：它不搬动、也不隐藏已经存在的流水，读取仍按目录实际形状进行。`auto` 保留原有行为——目录里已有按机器分放的流水或计算机名子目录，就继续那样写。
+
+### 不属于这份文件的键（profile 行配置）
+
+这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些写入审批与情绪维护的开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致：
+
+| 键 | 默认 | 含义 |
+|---|---|---|
+| `approveGlobalMemory` | `true` | `memory_write` / `memory_promote` 的 `scope="global"` 先请求一次性审批；`false` 关闭该门 |
+| `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）先请求一次性审批；`false` 关闭该门 |
+| `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
+
+把这些键写进 `.dsh/workspace.yml` 会命中下面的「未知键」错误：**报错并停用所有层**。这是刻意的——行配置是部署策略，不该被单个项目悄悄覆盖；反过来，项目级开关（`layers.*`、`inherit.*`）只由这份文件解释，不出现在 profile 里。
+
+于是按项目能控制的只有 `mood` / `inherit.mood`：要关掉情绪维护只能整体关情绪层；想保留情绪层、只关主动提醒，只能改 profile 的行配置（对该 profile 的所有工作区生效）。
 
 ## 文件会被自动创建
 
@@ -62,9 +76,9 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 
 ## 两类错误，两种后果
 
-1. **未知键 / 类型不对**（如 `memroy: false`、`rules: sometimes`）——报错**并停用全部三层**。
+1. **未知键 / 类型不对**（如 `memroy: false`、`rules: sometimes`，或把属于行配置的 `approveGlobalMemory` 写在这里）——报错**并停用全部层**。
    只报错却继续跑默认值，等于让那个开关静默失效，而这正是这份文件要防的事。
-2. **文件存在但读不了 / 解析不了**——同样停用全部三层。
+2. **文件存在但读不了 / 解析不了**——同样停用全部层。
 
 停用后，拒绝信息里会带出**逐条问题原文**（含行号）。这是刻意的：那种状态下提示段落是空的，拒绝信息是唯一能说明原因的地方。
 

@@ -6,9 +6,9 @@
 
 | 层 | 工作区来源 | 全局来源（跨工作区） | 抵达模型的方式 |
 |---|---|---|---|
-| 人格 persona | `.dsh/persona/*.md` | `$DSH_HOME/persona/*.md` | prompt 段落 + 2 个工具 |
-| 情绪 mood | `.dsh/mood/current.md` | `$DSH_HOME/mood/current.md` | prompt 段落（带衰减）+ 2 个工具 |
-| 记忆 memory | `.workbuddy/memory/` 或 `.dsh/memory/` | `$DSH_HOME/memory/` | prompt 段落（两段）+ 6 个工具 |
+| 人格 persona | `.dsh/persona/*.md` | `$DSH_HOME/persona/*.md` | prompt 段落 + 2 个工具（`persona_write` 需一次性审批） |
+| 情绪 mood | `.dsh/mood/current.md` | `$DSH_HOME/mood/current.md` | prompt 段落（衰减；`moodProactive` 时另注入情绪维护）+ 2 个工具 |
+| 记忆 memory | `.workbuddy/memory/` 或 `.dsh/memory/` | `$DSH_HOME/memory/` | prompt 段落（两段）+ 6 个工具（全局写入需一次性审批） |
 | 规则 rules | `.workbuddy/rules/*.md` | `$DSH_HOME/rules/*.md` | prompt 段落（两段）+ 2 个工具 |
 | 技能 skills | `.workbuddy/skills/` | 由 DSH 原生 `$DSH_HOME/skills` 提供（本插件不接管） | 注册进 `ctx.skills` 的原生 provider |
 
@@ -35,7 +35,7 @@ workspace-conventions:
 | | |
 |---|---|
 | **是什么** | [为什么需要它](#为什么需要它) · [人格](#人格persona) · [情绪](#情绪mood) · [记忆](#记忆) · [规则](#规则) · [技能](#技能) · [全局作用域](#全局作用域dsh_home) |
-| **怎么用** | [项目级开关](#项目级开关dshworkspaceyml) · [开关 × 目录](#开关--目录一张对照表) · [状态矩阵](#各层的状态矩阵) · [安装](#安装作为-bundle-装进某个-profile) |
+| **怎么用** | [项目级开关](#项目级开关dshworkspaceyml) · [行配置（profile）](#行配置profile审批与情绪维护的开关) · [开关 × 目录](#开关--目录一张对照表) · [状态矩阵](#各层的状态矩阵) · [安装](#安装作为-bundle-装进某个-profile) |
 | **怎么验证** | [对真实项目](#对着真实项目验证) · [校验覆盖命中](#校验-profile-覆盖真的命中了) · [实测归档](docs/verification/) |
 | **怎么开发** | [构建与测试](#构建与测试) · [目录结构](#目录结构) · [开发循环](#开发循环) · [升级注意](#升级注意) · [已知限制](#已知限制当前版本) |
 | **背景细节** | [设计文档](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)） · [双层作用域设计](docs/DESIGN-self-scopes.zh.md) · [配置格式规格](docs/workspace-config.md) · [历史留档](docs/legacy-preset/) |
@@ -61,6 +61,16 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 
 **日期流水有两种真实布局**：平铺（`memory/YYYY-MM-DD.md`）与按计算机名分目录（`memory/<计算机名>/YYYY-MM-DD.md`）。本行不假定是哪种，而是按目录的实际形状探测：一旦目录里出现装着日期文件的计算机名子目录，新流水就写进本机 `hostname` 对应目录；检索覆盖全部机器的目录；读取某一天时依次取本机、记忆目录根，只在其他机器唯一命中时才采用它。
 
+### 写入审批（全局作用域）
+
+工作区记忆写入是普通工具调用；**全局记忆写入要先经一次审批**：`memory_write(scope="global")` 与 `memory_promote(scope="global")` 在工具体执行前，经 DSH 的 approval seam 向用户要一次同意（行配置 `approveGlobalMemory` 默认 `true`）。
+
+- **只有「允许这一次」**：拒绝、取消、或部署里没有应答方时，DSH 直接拒绝该调用，**工具体从未执行、什么都不会写**；会话审批策略 `never` 同样是确定性拒绝，模型会看到可读的拒绝原因。没有"总是允许"——跨工作区即时可见的内容，每笔都单独批准。
+- 审批提示里是**有界摘要**：内容前约 60 个字符，够判断"这是不是我刚写的那条"，又不把整段流水铺进审批界面。
+- **不受影响**：工作区作用域的写入、`mood_set`、以及全部读取工具。
+- 已经被项目开关挡住的情况**不会先问审批**：`memory` 为 `read-only` / `disabled`、或 `inherit.memory: false` 时，工具自己的拒绝就是答案。
+- **要关掉这道门**：把行配置 `approveGlobalMemory` 设为 `false` 即可——但它对该 profile 的所有工作区生效，属于部署策略，**不能写进 `.dsh/workspace.yml`**（见[行配置（profile）](#行配置profile审批与情绪维护的开关)）。
+
 ## 人格（persona）
 
 身份、语气、价值观与禁忌——**跨项目不变**的东西，和"这个项目的事实"分开存放。
@@ -74,6 +84,15 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 - 注入为 `## 人格` 段落，整段预算 `personaPromptBytes`（默认 3 KB），单片段上限 `personaFileBytes`（默认 8 KB）；超限片段截断并留 `persona_read` 指针。
 - 工具：`persona_read`（列清单/读全文）、`persona_write`（写片段，密钥/PII 硬拒）、`self_status`（全景）。
 - 项目事实写进记忆，不写进人格——两者混淆是这套系统最常见的腐化方式。
+
+### 写入审批（两个作用域）
+
+`persona_write` 在**工作区与全局两个作用域都要一次性审批**（行配置 `approvePersonaWrite` 默认 `true`）：人格是每轮注入的身份层，改它不是"多一条记录"，而是换掉此后每次回答的语气与价值观，工作区人格也只影响一个项目但同样每轮出现。
+
+- 审批提示显示的是片段名和内容摘要；拒绝/取消/无应答方时调用被 DSH 拒绝、工具体从未执行。
+- 已经被挡住的写入**不会先问审批**：整个人格层被 `persona: false` 关掉，或全局写入被 `inherit.persona: false` 屏蔽时，工具的拒绝本身就是答案。
+- 语义与记忆侧相同（一次性、无"总是允许"、失败即拒绝），见上文「写入审批（全局作用域）」。
+- 这道门只管本插件自己的工具：通用 `write` / `edit` 直接改人格文件不经过审批，见[已知限制](#已知限制当前版本)。
 
 ## 情绪（mood）
 
@@ -95,6 +114,15 @@ updated: 2026-10-23T00:12:00+08:00
 - 工具：`mood_set`（写状态，自动记 `updated`）、`mood_get`（原始状态 + 衰减后视图）、`self_status`。
 - 不写历史流水；需要留档的结论请用 `memory_write`。
 
+### 情绪维护
+
+情绪层默认还会注入一小段 `## 情绪维护`（order 53，prompt 段落 `workspace-mood-maintenance`）：它请模型在**明确的状态变化**时顺手调用 `mood_set`——任务阶段切换、被纠正、卡住之后的突破、长任务收尾——同时写明"不要每轮都写一次""情绪不是记忆"。
+
+- **显示条件**：工作区 `mood` 层开着（默认开），且行配置 `moodProactive` 为 `true`（默认）。任一为假 → 段落为空串、**零 token**。
+- 存储里还没有情绪记录时（已探测且为空），多一行邀请"第一次写入"的条件提示；写过一次后它自己消失。
+- 衰减、半衰期与"取最新一份"的逻辑**完全没变**；这段文字只在"第一次写入"前后各有一个稳定形态，不随情绪强度变化。
+- 它只能**鼓励**，不能强制：prompt 段落没有"必须调用工具"的表达力，真正的自动维护需要另一个常驻循环插件。项目级无法只关这段而保留情绪层，见[已知限制](#已知限制当前版本)。
+
 ## 全局作用域（`$DSH_HOME`）
 
 | 层 | 全局目录 | 工作区同名遮蔽 |
@@ -106,6 +134,7 @@ updated: 2026-10-23T00:12:00+08:00
 
 - 全局根默认就是 `$DSH_HOME`（`~/.dsh`），可用行配置 `globalRoot` 整体搬家——`$DSH_HOME/{persona,mood,memory,rules}` 目前没有其它机制占用，但记忆/人格这类名字未来被 DSH 或别的插件征用并非不可能，这个配置就是为此留的逃生门。
 - 全局写入落在工作区之外：`workspace-write` 策略会拒绝，工具会返回原因与替代方案（改 `scope="workspace"`，或放宽策略）。`danger-full-access` 下可写。
+- 即便沙箱放行，全局记忆与人格写入仍各有一道**一次性审批**（见上文「写入审批」）——审批不是许可，而是同意；无应答方时按拒绝处理。
 - 全局记忆的准入比工作区更严：只接受 `preference` / `constraint` / `convention` / `decision` 四类，项目一次性发现留在工作区。
 
 ## 规则
@@ -138,10 +167,11 @@ updated: 2026-10-23T00:12:00+08:00
 package.json          # 包清单；dsh.bundle.patch 是「可被管理器安装的 Bundle」的入场券
 cordis.patch.yml      # Bundle 载荷：把 workspace-conventions 这一行插进 profile 的层栈
 tsconfig.json         # 独立严格配置（对齐 harness 的 tsconfig.base.json 开关）
-src/index.ts          # 装配层：配置、13 个工具、6 个 prompt 段落、技能 provider、触碰追踪
+src/index.ts          # 装配层：配置、13 个工具、7 个 prompt 段落、技能 provider、触碰追踪
 src/scope.ts          # 双层作用域：全局根解析、各层目录、路径包含判断
 src/persona.ts        # 人格片段（纯逻辑）：解析、排序、遮蔽合并、预算渲染
-src/mood.ts           # 情绪状态（纯逻辑）：解析/生成、半衰期衰减、确定性渲染
+src/mood.ts           # 情绪状态（纯逻辑）：解析/生成、半衰期衰减、确定性渲染、「情绪维护」段落文本
+src/approval.ts       # 写入审批（纯逻辑）：哪些调用要问、摘要裁剪与审批提示文本
 src/memory.ts         # 记忆模型（纯逻辑）：准入、条目渲染、索引编辑、流水盘点
 src/rules.ts          # 规则册解析、分类、触发判定、段落渲染与预算
 src/skills.ts         # 技能包解析与 ctx.skills provider 工厂
@@ -189,12 +219,26 @@ workspace-conventions:
 
 - `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常，只读不等于失明。
 - `inherit.memory: false` 会让 `global-memory` 段落消失，并**连工具都拒绝** `scope="global"`——屏蔽要是能绕过的，就等于没屏蔽。
-- `inherit.persona/mood/rules: false` 只影响注入（与读工具对全局那部分），工作区自己的层照常。
+- `inherit.persona/mood/rules: false` 屏蔽该层的**全局来源**：注入与对全局的读写工具一起失效（全局写入会被拒），工作区自己的层照常。
 - 未知键（包括 `inherit` 里拼错层名）或类型不对会**报错并停用所有层**：只报错却照跑默认值，等于让那个开关静默失效。
 - `memoryLayout` 只决定新流水写到哪里，不搬动也不隐藏已有流水。
 - 格式、错误语义、自动创建与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
 
 `pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
+
+### 行配置（profile）：审批与情绪维护的开关
+
+0.6.0 新增的三个键是**行配置**（profile 组合里 `workspace-conventions` 那一行的 `config:`），**不是这份项目文件里的键**：
+
+| 键 | 默认 | 作用 |
+|---|---|---|
+| `approveGlobalMemory` | `true` | `scope="global"` 的 `memory_write` / `memory_promote` 是否先要一次性审批 |
+| `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）是否先要一次性审批 |
+| `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
+
+边界是刻意的：行配置随 profile 生效、对该 profile 的所有工作区一致，属于**部署策略**；`.dsh/workspace.yml` 只说"这个项目里层开不开、是否继承全局"（`layers.*` / `inherit.*`）。把上面三个键写进 `.dsh/workspace.yml` 会命中**未知键**错误——报错并停用所有层，正是为了让"以为按项目关了审批"不可能悄悄发生。
+
+于是项目级能控制的只有 `mood` / `inherit.mood`：要关掉情绪维护只能整体关情绪层；想保留情绪层、只关主动提醒，只能改 profile 的行配置（对所有工作区生效）。
 
 ### 开关 × 目录：一张对照表
 
@@ -252,7 +296,7 @@ workspace-conventions:
 - **只读时不注入记忆段落**：该段落承载的就是索引正文。只读工作区仍可用 `memory_read` / `memory_search` 取到同样内容，每轮再注入一遍只是重复付费。
 - **屏蔽是彻底的**：`inherit.memory: false` 同时掐掉注入与工具的 `scope="global"` 路径。只掐一半会让开关变成装饰。
 - **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（带 `config` 字段）、`self_status`（带全部层与继承状态），或看 `pnpm verify:workbuddy` 报告的开头。
-- **本插件不提供 GUI**：配置来源只有两处—层的开关与继承在项目级 `.dsh/workspace.yml`（唯一来源），字节预算与全局根在 profile 的 `cordis.patch.yml`（每轮 token 的全局策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
+- **本插件不提供 GUI**：配置来源只有两处—层的开关与继承在项目级 `.dsh/workspace.yml`（唯一来源），字节预算、全局根、以及 0.6.0 的审批/情绪维护开关在 profile 的 `cordis.patch.yml`（面向整个 profile 的策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
 
 ### 记忆后端的选取与开关无关
 
@@ -348,6 +392,10 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 ## 已知限制（当前版本）
 
 - **全局写入受沙箱策略约束**：`$DSH_HOME` 在工作区之外，`workspace-write` 下写入被拒（工具会说明并建议 `scope="workspace"`）；`danger-full-access` 或把该路径纳入允许范围时才能写。
+- **写入审批只覆盖本插件的工具**：模型仍可用通用 `write` / `edit` 直接改 `$DSH_HOME/persona`、mood 文件——那两条工具没有接审批。把通用文件工具纳入统一门禁是 phase 2 的工作；0.6.0 只保证"经本插件写入"这条路可审计，不假装它是完整边界。
+- **审批没有"总是允许"**：每笔全局记忆/人格写入都要单独批准；会话审批策略 `never`、或部署没有任何应答方时，一律确定性拒绝（fail-closed），模型看到可读的拒绝原因。
+- **`moodProactive` 是行配置**：单个项目无法只关「情绪维护」而保留情绪层——`.dsh/workspace.yml` 里只有 `mood` / `inherit.mood`；按项目控制只能整体关 `mood`。
+- **情绪维护只是鼓励**：prompt 段落表达不了"必须调用工具"，也没有每轮自动写入；真自动化需要一个常驻循环（daemon-loop）插件，本行不做。
 - **全局层在本进程内缓存**：外部直接改 `$DSH_HOME/{persona,mood,memory,rules}` 不会实时生效，要等下一个新会话（`agent/created` 会重读）、经工具的一次写入，或重启进程。
 - 写入是整文件读—改—写，**无锁**；同一工作区并发写可能丢一次写入（全局层同此，且跨工作区共享，风险更高）。
 - 工作区缓存冷启动会先渲染**一轮预热提示**（因为 prompt provider 契约要求同步返回）；规则段落在冷却时渲染空串而非提示。
@@ -365,6 +413,14 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 设计细节与逐层取舍见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)）。
 
 ## 变更记录
+
+### 0.6.0 — 写入审批与情绪维护
+
+- **写入审批**：`memory_write` / `memory_promote` 的 `scope="global"`、以及 `persona_write`（工作区与全局两个作用域）在工具体执行前，经 DSH approval seam 请求**一次性**同意（`tools/pre-execute` → `{kind:'ask'}`，只接受 `allowed-once`）。拒绝/取消/无应答方 = DSH 拒绝调用、工具体从未执行；会话策略 `never` 确定性拒绝。工作区记忆写入、`mood_set`、全部读取不受影响。没有"总是允许"。
+- **三个行配置**：`approveGlobalMemory` / `approvePersonaWrite` / `moodProactive`，全部布尔、默认 `true`。属于 profile 的行配置，**不能**写进 `.dsh/workspace.yml`；项目级开关仍是 `layers.*` / `inherit.*`。
+- **情绪维护段落**：新增同步 provider `workspace-mood-maintenance`（order 53），在情绪层开着且 `moodProactive` 为真时注入 `## 情绪维护`，鼓励在明确状态变化时顺手 `mood_set`（阶段切换、被纠正、卡住后突破、长任务收尾），并说明不要每轮写、情绪不是记忆；没有情绪记录时多一行第一次写入的邀请，有状态后消失。任一开关关闭 = 0 token，衰减逻辑不变。
+- **明确留给 phase 2**：通用 `write` / `edit` 仍可绕过审批直接改人格/情绪文件；本版只门本插件自己的工具。
+- prompt 段落 6 → 7 个；工具仍为 13 个。
 
 ### 0.5.1 — 缓存与上下文优化
 
