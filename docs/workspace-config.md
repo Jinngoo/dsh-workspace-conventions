@@ -52,6 +52,8 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 
 `memoryLayout` 只管**下一次写到哪里**：它不搬动、也不隐藏已经存在的流水，读取仍按目录实际形状进行。`auto` 保留原有行为——目录里已有按机器分放的流水或计算机名子目录，就继续那样写。
 
+`memoryLayout` **只属于 memory**：persona / mood / rules 没有对应键。布局是「追加型、按日期分片」数据的分片策略，不是通用开关；人格/规则是可按名字 review 的低频整文件，情绪是覆盖写的短命状态，给它们分机器目录会换来身份/规则分裂或注入文本抖动。完整理由见 [DESIGN.zh.md](DESIGN.zh.md) 的「为什么只有 memory 有布局（persona / mood / rules 不做）」。
+
 ### 不属于这份文件的键（profile 行配置）
 
 这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些写入审批与情绪维护的开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致：

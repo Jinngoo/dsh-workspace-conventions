@@ -21,7 +21,7 @@ workspace-conventions:
   mood: true            # 是否注入情绪状态
   rules: true
   skills: false
-  memoryLayout: host    # auto | flat | host
+  memoryLayout: auto    # auto（默认）| flat | host
   inherit:              # false = 屏蔽全局，只看本工作区
     persona: true
     mood: true
@@ -205,7 +205,7 @@ workspace-conventions:
   skills: false
   persona: true
   mood: true
-  memoryLayout: host    # auto（默认）| flat | host — 新流水写到哪里
+  memoryLayout: auto    # auto（默认）| flat | host — 新流水写到哪里
 
   # 第二轴：是否继承全局作用域（false = 屏蔽全局，只看本工作区）
   inherit:
@@ -221,7 +221,7 @@ workspace-conventions:
 - `inherit.memory: false` 会让 `global-memory` 段落消失，并**连工具都拒绝** `scope="global"`——屏蔽要是能绕过的，就等于没屏蔽。
 - `inherit.persona/mood/rules: false` 屏蔽该层的**全局来源**：注入与对全局的读写工具一起失效（全局写入会被拒），工作区自己的层照常。
 - 未知键（包括 `inherit` 里拼错层名）或类型不对会**报错并停用所有层**：只报错却照跑默认值，等于让那个开关静默失效。
-- `memoryLayout` 只决定新流水写到哪里，不搬动也不隐藏已有流水。
+- `memoryLayout` 默认 `auto`：沿用目录里已有的布局（全新目录即平铺在 `memory/` 下）；它只决定**新流水写到哪里**，不搬动也不隐藏已有流水。只有 memory 有布局键——persona / mood / rules 没有，理由见 [DESIGN.zh.md](docs/DESIGN.zh.md) 的「为什么只有 memory 有布局」小节。
 - 格式、错误语义、自动创建与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
 
 `pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
