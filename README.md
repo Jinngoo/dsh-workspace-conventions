@@ -12,17 +12,17 @@
 | 规则 rules | `.workbuddy/rules/*.md` | `$DSH_HOME/rules/*.md` | prompt 段落（两段）+ 2 个工具 |
 | 技能 skills | `.workbuddy/skills/` | 由 DSH 原生 `$DSH_HOME/skills` 提供（本插件不接管） | 注册进 `ctx.skills` 的原生 provider |
 
-**两条正交的开关**（`.dsh/workspace.yml`，文件会在首次使用时自动创建）：这一层是否启用，以及是否继承全局作用域。
+**两条正交的开关**（`.dsh/workspace.yml`，文件会在首次使用时自动创建）。下例即**程序默认值**，把某个键改成其它值才覆盖该默认：
 
 ```yaml
 workspace-conventions:
-  memory: read-only     # enabled | read-only | disabled
-  persona: true         # 是否注入人格片段
-  mood: true            # 是否注入情绪状态
-  rules: true
-  skills: false
+  memory: enabled       # enabled（默认）| read-only | disabled
+  persona: true         # 默认 true：是否注入人格片段
+  mood: true            # 默认 true：是否注入情绪状态
+  rules: true           # 默认 true
+  skills: true          # 默认 true
   memoryLayout: auto    # auto（默认）| flat | host
-  inherit:              # false = 屏蔽全局，只看本工作区
+  inherit:              # 默认全 true；false = 屏蔽全局，只看本工作区
     persona: true
     mood: true
     memory: true
@@ -199,21 +199,23 @@ docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-pr
 ```yaml
 # <项目>/.dsh/workspace.yml
 workspace-conventions:
-  # 第一轴：这一层是否启用
-  memory: read-only     # enabled（默认）| read-only | disabled
-  rules: false
-  skills: false
-  persona: true
-  mood: true
+  # 第一轴：这一层是否启用（以下全部是程序默认值，改值才覆盖默认）
+  memory: enabled       # enabled（默认）| read-only | disabled
+  rules: true           # 默认 true
+  skills: true          # 默认 true
+  persona: true         # 默认 true
+  mood: true            # 默认 true
   memoryLayout: auto    # auto（默认）| flat | host — 新流水写到哪里
 
-  # 第二轴：是否继承全局作用域（false = 屏蔽全局，只看本工作区）
+  # 第二轴：是否继承全局作用域（默认全 true；false = 屏蔽全局，只看本工作区）
   inherit:
     persona: true
     mood: true
     memory: true
     rules: true
 ```
+
+上面的值全部等于程序默认值，把任一键改成其它值才覆盖默认。
 
 文件**不存在时会被自动创建**成一份全部注释掉的起手模板（不改变任何行为，只为可发现、可编辑）；已存在的文件永不覆盖。
 
