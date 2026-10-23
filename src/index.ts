@@ -874,7 +874,6 @@ export function apply(ctx: Context, config: Config): void {
         ? '# 工作区记忆（已检测到 WorkBuddy 体系，按原生准则兼容）'
         : '# 工作区记忆（无既有记忆体系，使用 DSH 默认规则）',
       '',
-      `- 工作区：${toPosix(workspace)}`,
       `- 生效后端：${state.name}${state.compat ? '（兼容模式）' : '（默认模式）'}`,
       `- 记忆目录：${toPosix(state.dir)}`,
       `- 索引：${toPosix(state.index)}（${String(state.bytes)} 字节）`,
@@ -883,7 +882,6 @@ export function apply(ctx: Context, config: Config): void {
           + (state.ledgers.length > 3 ? ` 等共 ${String(state.ledgers.length)} 个` : '')
         : '无'}`,
       `- 流水布局：${state.layout === 'host' ? `按计算机名分目录（本机 ${state.host}）` : '平铺在记忆目录下'}${layoutPreference === 'auto' ? '' : '（由项目配置指定，未自动沿用目录已有布局）'}`,
-      '- 工具：memory_status / memory_read / memory_search / memory_write / memory_promote / memory_help',
       '',
       '写入准则：',
       ...criteria,
@@ -1050,7 +1048,7 @@ export function apply(ctx: Context, config: Config): void {
     name: 'memory_read',
     description:
       '读取记忆。layer=index 返回索引 MEMORY.md —— 硬约束、稳定偏好与文档指针；layer=ledger 返回某一天的流水文件，默认今天。'
-      + 'scope=workspace（默认）读本工作区，scope=global 读跨工作区的全局记忆。日期文件可能平铺在记忆目录下，也可能按计算机名放在子目录里，本工具会按目录实际形状定位。',
+      + 'scope=workspace（默认）读本工作区，scope=global 读跨工作区的全局记忆。',
     parameters: {
       layer: { type: 'string' as const, enum: ['index', 'ledger'], description: 'index = 索引 MEMORY.md；ledger = 某一天的日期流水' },
       scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享的全局记忆' },
@@ -1169,8 +1167,7 @@ export function apply(ctx: Context, config: Config): void {
     description:
       '经准入审查后，向日期流水追加一条跨会话仍有价值的记忆：决策及其理由、稳定偏好、约定、可复现的坑、环境限制、硬约束。'
       + '绝不记录密钥、一次性改动或排错流水账；读起来像流水账的条目会被拒绝，除非 force=true。'
-      + 'scope=workspace（默认）写本工作区；scope=global 写跨工作区共享的全局记忆，写入会对所有工作区可见，且 kind 只接受 preference/constraint/convention/decision。'
-      + '写入位置遵循记忆目录的实际布局：平铺时写 memory/YYYY-MM-DD.md，按计算机名分目录时写 memory/<本机计算机名>/YYYY-MM-DD.md。',
+      + 'scope=workspace（默认）写本工作区；scope=global 写跨工作区共享的全局记忆，写入对所有工作区可见，kind 只接受 preference/constraint/convention/decision。',
     parameters: {
       content: { type: 'string' as const, required: true, description: '持久的事实、决策、约定或坑本身' },
       kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '条目分类，默认 fact' },

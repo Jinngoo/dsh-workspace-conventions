@@ -296,16 +296,22 @@ function arousalLabel(value: number | undefined): string {
 }
 
 /**
- * 年龄的中文表述，自己算而不走 `Intl`，保证跨 locale 确定。
+ * 年龄的**粗粒度**表述，自己算而不走 `Intl`，保证跨 locale 确定。
  *
- * 分钟数四舍五入（避免毫秒误差把 6 小时显示成 5 小时）；不足 1 小时用分钟，
- * 否则用整小时（向下取整）。
+ * 注入文本会进入 runtime-context 快照，而快照只在文本变化时追加；分钟级或
+ * 两位小数的表述会让它每分钟都变，长会话里持续追加整份快照（实测一份约
+ * 1.2 KB，且包含其它插件的上下文）。因此这里把年龄分桶到 ≥ 半小时的粒度：
+ * 同一份情绪状态在约一小时内最多只让快照变化一次。
+ *
+ * 分桶：`< 15 分钟` → 刚刚；`< 90 分钟` → 约半小时前；其余按整小时向下取整。
  * @param ageHours - 已算出的小时数（此时必为有限值）。
- * @returns 例如「3 小时前」「42 分钟前」。
+ * @returns 例如「约 3 小时前」「刚刚」「约半小时前」。
  */
 function ageText(ageHours: number): string {
-  const minutes = Math.max(0, Math.round(ageHours * 60))
-  return minutes < 60 ? `${minutes} 分钟前` : `${Math.floor(minutes / 60)} 小时前`
+  const minutes = Math.max(0, ageHours * 60)
+  if (minutes < 15) return '刚刚'
+  if (minutes < 90) return '约半小时前'
+  return `约 ${Math.floor(minutes / 60)} 小时前`
 }
 
 /**
@@ -336,7 +342,11 @@ export function moodView(state: MoodState, now: Date, options: MoodDecayOptions)
 
   if (!fresh) return { fresh: false, ageHours, weight, text: CALM_TEXT }
 
-  const text = `${STATUS_PREFIX}${state.label}（${valenceLabel(state.valence)}、${arousalLabel(state.arousal)}，强度 ${weight.toFixed(2)}，${ageText(ageHours)}）`
+  // Deliberately no numeric intensity: `weight` changes continuously, so putting
+  // it in the injected line would rewrite the snapshot every few minutes. The
+  // exact value stays available through `mood_get`; the prompt only needs the
+  // label, the coarse trend and the coarse age.
+  const text = `${STATUS_PREFIX}${state.label}（${valenceLabel(state.valence)}、${arousalLabel(state.arousal)}，${ageText(ageHours)}）`
   return { fresh: true, ageHours, weight, text, label: state.label }
 }
 

@@ -248,8 +248,9 @@ describe('decay', () => {
     expect(view.ageHours).toBe(0)
     expect(view.weight).toBe(1)
     expect(view.label).toBe('专注')
-    expect(view.text).toContain('强度 1.00')
-    expect(view.text).toContain('0 分钟前')
+    // The injected line is cache-friendly: no numeric intensity, coarse age.
+    expect(view.text).toContain('刚刚')
+    expect(view.text).not.toContain('强度')
   })
 
   it('halves the weight after one half-life (6h)', () => {
@@ -257,8 +258,7 @@ describe('decay', () => {
 
     expect(view.fresh).toBe(true)
     expect(view.weight).toBeCloseTo(0.5, 12)
-    expect(view.text).toContain('强度 0.50')
-    expect(view.text).toContain('6 小时前')
+    expect(view.text).toContain('约 6 小时前')
   })
 
   it('quarters the weight after two half-lives (12h)', () => {
@@ -266,8 +266,7 @@ describe('decay', () => {
 
     expect(view.fresh).toBe(true)
     expect(view.weight).toBeCloseTo(0.25, 12)
-    expect(view.text).toContain('强度 0.25')
-    expect(view.text).toContain('12 小时前')
+    expect(view.text).toContain('约 12 小时前')
   })
 
   it('survives four half-lives (24h) as still fresh', () => {
@@ -386,10 +385,16 @@ describe('valence and arousal mapping', () => {
     expect(moodView(stateAt0(), T0, DECAY).text).toContain('、适中，')
   })
 
-  it('renders sub-hour ages in minutes and whole hours otherwise', () => {
-    expect(moodView(stateAt0(), at(0.4), DECAY).text).toContain('24 分钟前')
-    expect(moodView(stateAt0(), at(0.5), DECAY).text).toContain('30 分钟前')
-    expect(moodView(stateAt0(), at(1.5), DECAY).text).toContain('1 小时前')
+  it('renders ages in coarse buckets so the snapshot changes rarely', () => {
+    // Under 15 minutes: "just now" for the whole first quarter hour.
+    expect(moodView(stateAt0(), at(0.05), DECAY).text).toContain('刚刚')
+    expect(moodView(stateAt0(), at(0.2), DECAY).text).toContain('刚刚')
+    // 15 to 90 minutes: one bucket, so 24 and 30 minutes render identically.
+    expect(moodView(stateAt0(), at(0.4), DECAY).text).toContain('约半小时前')
+    expect(moodView(stateAt0(), at(0.5), DECAY).text).toBe(moodView(stateAt0(), at(0.4), DECAY).text)
+    // Whole hours afterwards: 1.5h and 1.9h are the same string.
+    expect(moodView(stateAt0(), at(1.5), DECAY).text).toContain('约 1 小时前')
+    expect(moodView(stateAt0(), at(1.9), DECAY).text).toBe(moodView(stateAt0(), at(1.5), DECAY).text)
   })
 
   it('is deterministic for identical inputs', () => {
@@ -402,14 +407,14 @@ describe('section rendering', () => {
     const text = renderMoodSection(requireState(buildFocus()), at(6), RENDER)
 
     expect(text).toBe(
-      '## 情绪\n当前情绪：专注（偏积极、平静，强度 0.50，6 小时前）\n\n正在收尾一个插件设计，节奏紧凑但不急躁。',
+      '## 情绪\n当前情绪：专注（偏积极、平静，约 6 小时前）\n\n正在收尾一个插件设计，节奏紧凑但不急躁。',
     )
   })
 
   it('renders the body straight after the status line when there is no note', () => {
     const text = renderMoodSection(requireState(buildMoodDocument({ label: '专注' }, T0)), T0, RENDER)
 
-    expect(text).toBe('## 情绪\n当前情绪：专注（中性、适中，强度 1.00，0 分钟前）')
+    expect(text).toBe('## 情绪\n当前情绪：专注（中性、适中，刚刚）')
   })
 
   it('renders one calm line when stale and quiet rendering is on', () => {

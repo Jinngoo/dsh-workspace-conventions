@@ -366,6 +366,13 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 
 ## 变更记录
 
+### 0.5.1 — 缓存与上下文优化
+
+- **mood 注入文本改为缓存友好**：去掉精确强度（连续变化，会每几分钟改一次文本），年龄改为粗桶（`刚刚` / `约半小时前` / `约 N 小时前`）。同一份状态在 2 小时窗口内渲染出的不同文本从 **71 种降到 4 种**，runtime-context 快照的追加频率从「每分钟」降到「每小时」量级。精确 `weight` 仍可从 `mood_get` / `self_status` 取。
+- **工作区记忆段落瘦身**：去掉与工具 schema 重复的工具清单行，以及已被 runtime context 覆盖的工作区路径行（每次会话约省 140 字节；这是每会话固定的上下文）。
+- **工具描述精简**：`memory_write` / `memory_read` 去掉与 `memory_help`、`memory_status` 输出重复的布局说明，13 个工具 schema 从 5409 → 5293 字节。
+- 背景（实测于本会话日志）：插件内容作为 **user 角色 runtime-context 快照**追加在历史末尾，只在文本变化时追加（`runtime-context.ts` 的 `project()` 比对），因此不破坏前缀缓存；378 次请求的缓存命中率为 **97.1%**（111.5M 命中 / 3.3M 未缓存输入），重启后的首个 turn 掉到 76% 再回升。真正需要控制的是**变化频率**，而不是「每轮都发」——LLM API 无状态，完整上下文本来就每轮重发。
+
 ### 0.5.0 — 双层作用域与「自我层」
 
 - **新增全局作用域**：`$DSH_HOME/{persona,mood,memory,rules}`，与工作区 `<project>/.dsh/` 对称；全局根可用 `globalRoot` 覆盖（`$DSH_HOME` 下这些名字目前无人占用，但未来被其他机制征用时这是逃生门）。
