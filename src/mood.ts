@@ -386,3 +386,38 @@ export function renderMoodSection(
   }
   return clipBytes(lines.join('\n'), options.maxBytes).text
 }
+
+/** 渲染「情绪维护」段落所需的参数。 */
+export interface MoodMaintenanceOptions {
+  /**
+   * 本作用域确实没有任何情绪记录（探测已完成，工作区与全局都为空）。
+   *
+   * 只有这个状态才邀请「写第一条」；已记录但已平复不算空缺，不能再说成
+   * 「尚无记录」，否则每次平复后都会冒出一句误导性提示。
+   */
+  readonly missingRecord: boolean
+}
+
+/**
+ * 渲染每轮注入的「情绪维护」段落。
+ *
+ * 情绪层只是工具，模型不写就没有。这个段落把「何时值得写」说清楚，让主动
+ * 更新有依据，同时明确禁止机械地每轮写入——情绪是状态，不是流水账。
+ *
+ * 必须是纯函数且不含时间：注入文本进入 runtime-context 快照，快照只在文本
+ * 变化时追加。开关不变时文本必须逐字节相同，否则每轮都会追加一份快照。
+ * @param options - 是否处于「尚无任何记录」的空缺态。
+ * @returns 固定段落文本；调用方决定是否注入（层关闭或 `moodProactive` 为
+ *   false 时整段消失，token 为 0）。
+ */
+export function renderMoodMaintenanceSection(options: MoodMaintenanceOptions): string {
+  const lines = [
+    '## 情绪维护',
+    '情绪层已开启：本轮工作出现明确的状态变化（任务阶段切换、被纠正、卡住后突破、长任务收尾）时，可主动调用 mood_set 更新；无变化不必每轮写入。',
+    '情绪只描述此刻的倾向与唤醒度，不是记忆：项目事实用 memory_write，不要写进情绪。',
+  ]
+  if (options.missingRecord) {
+    lines.push('（尚无情绪记录：出现明确状态时可写第一条，之后只在变化时更新。）')
+  }
+  return lines.join('\n')
+}

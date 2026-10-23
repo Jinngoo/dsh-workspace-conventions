@@ -2,9 +2,10 @@
  * End-to-end wiring: drive the real `apply()` against the on-disk fixture.
  *
  * Everything else in this suite tests pure functions. This file is the only
- * place that proves the row actually registers what it claims — two prompt
- * sections in the right order, eight tools, one skill provider, and a
- * `tools/result` listener that turns a file touch into a rule injection.
+ * place that proves the row actually registers what it claims — seven prompt
+ * sections in the right order, thirteen tools, one skill provider, a
+ * `tools/result` listener that turns a file touch into a rule injection, and a
+ * `tools/pre-execute` gate that asks before cross-workspace writes.
  */
 
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
@@ -50,11 +51,16 @@ interface FakeTool {
  * The filesystem stands in for `ctx.fs` with real Node reads, so discovery,
  * parsing and rendering all run against the fixture's actual bytes.
  */
-function harness(workspace: string = WORKSPACE, options: { readonly globalRoot?: string } = {}): {
+function harness(workspace: string = WORKSPACE, options: { readonly globalRoot?: string, readonly config?: Partial<Config> } = {}): {
   /** The prompt sections, carrying the agent they were mounted for. */
   sections: Section[] & { readonly agent: FakeAgent }
   tools: FakeTool[]
   emit: (event: string, ...args: unknown[]) => void
+  /** The `tools/pre-execute` waterfall; `next` defaults to an allow. */
+  preExecute: (
+    call: unknown,
+    next?: () => Promise<{ readonly kind: string }>,
+  ) => unknown
   skillProvider: () => { list: (o: unknown) => Promise<readonly { name: string }[]> } | undefined
 } {
   const sections = [] as Section[] & { agent: FakeAgent }
@@ -94,18 +100,24 @@ function harness(workspace: string = WORKSPACE, options: { readonly globalRoot?:
     logger: { warn: () => undefined },
   }
 
-  const config: Config = {
+  const config = {
     indexPromptBytes: 7000,
     rulesPromptBytes: 32 * 1024,
     ruleFileBytes: 16 * 1024,
     ...options.globalRoot !== undefined ? { globalRoot: options.globalRoot } : {},
-  }
+    // Row-level switches under test override the defaults above.
+    ...(options.config ?? {}),
+  } as Config
   apply(ctx as never, config)
 
   return {
     sections,
     tools,
     emit: (event, ...args) => { handlers.get(event)?.(...(args as never[])) },
+    preExecute: (call, next) => handlers.get('tools/pre-execute')?.(
+      call as never,
+      (next ?? (async () => ({ kind: 'allow' }))) as never,
+    ),
     skillProvider: () => factory?.(control) as { list: (o: unknown) => Promise<readonly { name: string }[]> } | undefined,
   }
 }
@@ -132,16 +144,18 @@ const section = (sections: readonly Section[] & { readonly agent?: FakeAgent }, 
   sections.find((entry) => entry.name === name)?.text({ agent: sections.agent ?? AGENT }) ?? ''
 
 describe('row wiring', () => {
-  it('registers the six prompt sections in persona → mood → rules → memory order', () => {
+  it('registers the seven prompt sections in persona → mood → rules → memory order', () => {
     const { sections } = harness()
     expect(sections.map((s) => s.name)).toEqual([
       'workspace-persona',
       'workspace-mood',
+      'workspace-mood-maintenance',
       'global-rules',
       'workspace-rules',
       'global-memory',
       'workspace-memory',
     ])
+    expect(sections.map((s) => s.order)).toEqual([50, 52, 53, 54, 55, 58, 60])
     const orders = sections.map((s) => s.order)
     expect([...orders].sort((left, right) => left - right)).toEqual(orders)
   })
@@ -164,6 +178,18 @@ describe('row wiring', () => {
     ])
   })
 
+  it('renders the mood-maintenance section by default', () => {
+    // moodProactive and the mood layer both default on, and an unprobed store is
+    // not a missing one, so the unconditional body renders on the first turn.
+    expect(section(harness().sections, 'workspace-mood-maintenance')).toContain('## 情绪维护')
+  })
+
+  it('renders no mood section at all when moodProactive is off', () => {
+    const { sections } = harness(WORKSPACE, { config: { moodProactive: false } })
+    expect(section(sections, 'workspace-mood')).toBe('')
+    expect(section(sections, 'workspace-mood-maintenance')).toBe('')
+  })
+
   it('renders the memory section from the fixture index', async () => {
     const { sections } = harness()
     const text = await settled(
@@ -184,6 +210,34 @@ describe('row wiring', () => {
     expect(text).toContain('01-协作红线.md')
     expect(text).toContain('尚未触发的条件册')
     expect(text).not.toContain('### 10-服务端铁律.md')
+  })
+})
+
+describe('the approval gate wiring', () => {
+  /** One pending call as the scheduler hands it to the waterfall. */
+  const pending = (args: Record<string, unknown>) => ({
+    name: 'memory_write',
+    arguments: args,
+    agent: AGENT,
+    callId: 'c1',
+    signal: new AbortController().signal,
+  })
+
+  it('asks before a global memory_write although the harness config omits the approval switches', async () => {
+    // The harness passes no `approveGlobalMemory` key: the row's defensive merge
+    // must default it to true, otherwise this cross-workspace write slips past.
+    const decision = await harness().preExecute(pending({ scope: 'global', content: '记住发布日' }))
+    expect(decision).toMatchObject({ kind: 'ask' })
+    const ask = decision as { readonly reason?: string, readonly displayReason?: { readonly en?: string, readonly zh?: string } }
+    expect(ask.reason).toContain('记住发布日')
+    expect(ask.displayReason?.en).toBeTruthy()
+    expect(ask.displayReason?.zh).toBeTruthy()
+  })
+
+  it('passes a workspace-scoped memory_write straight through', async () => {
+    const next = async () => ({ kind: 'allow' as const })
+    const decision = await harness().preExecute(pending({ scope: 'workspace', content: '项目事实' }), next)
+    expect(decision).toEqual({ kind: 'allow' })
   })
 })
 
@@ -339,6 +393,17 @@ describe('project-level layer switches', () => {
     expect(refused.ok).toBe(false)
     expect(refused.error).toContain('rules 层在本工作区已禁用')
     expect(refused.error).toContain('.dsh/workspace.yml')
+  })
+
+  it('turns the mood layer off: both mood sections render nothing', async () => {
+    const harnessed = harness(workspace)
+    await configure('workspace-conventions:\n  mood: false\n')
+    await configured(harnessed, 'rule_status')
+
+    // The workspace switch, not the row config, must zero the maintenance
+    // section too: a disabled layer costs 0 tokens on every turn.
+    expect(section(harnessed.sections, 'workspace-mood')).toBe('')
+    expect(section(harnessed.sections, 'workspace-mood-maintenance')).toBe('')
   })
 
   it('keeps every layer on when the file has no section for this plugin', async () => {

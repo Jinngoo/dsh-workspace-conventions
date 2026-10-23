@@ -37,7 +37,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
-import { defineTool, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import { defineTool, type PreToolDecision, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { JsonValue } from '@deepseek-ai/dsh-util-values'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-fs'
@@ -47,6 +47,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
 
 import { DEFAULT_DIR, INDEX_FILE, MEMORY_SUBDIR, RULES_SUBDIR, WORKBUDDY_DIR } from './layout.js'
+import { approvalRequestFor } from './approval.js'
 import {
   ENTRY_KINDS,
   HARD_RULES,
@@ -76,6 +77,7 @@ import {
   buildMoodDocument,
   moodView,
   parseMoodDocument,
+  renderMoodMaintenanceSection,
   renderMoodSection,
   type MoodState,
 } from './mood.js'
@@ -146,8 +148,11 @@ export {
   buildMoodDocument,
   moodView,
   parseMoodDocument,
+  renderMoodMaintenanceSection,
   renderMoodSection,
 } from './mood.js'
+export { approvalRequestFor, digestOf } from './approval.js'
+export type { ApprovalPolicy, ApprovalRequest, GatedToolCall } from './approval.js'
 export {
   mergePersona,
   parsePersonaFragment,
@@ -224,6 +229,28 @@ export interface Config {
    * every global layer without a code change.
    */
   globalRoot: string
+  /**
+   * Require a one-time user approval before a write to the GLOBAL memory scope
+   * (`memory_write` / `memory_promote` with `scope: "global"`).
+   *
+   * Global memory is injected into every workspace, so it is the one memory
+   * store whose mistakes travel. The approval prompt carries a bounded excerpt
+   * of the entry; a rejection means the tool body never runs.
+   */
+  approveGlobalMemory: boolean
+  /**
+   * Require a one-time user approval before ANY `persona_write`, in either
+   * scope. Persona is identity prose injected every turn, and a workspace
+   * fragment can be as costly as a global one; `false` restores the old
+   * tool-only behaviour.
+   */
+  approvePersonaWrite: boolean
+  /**
+   * Encourage the model to update the workspace mood opportunistically while
+   * the mood layer is on. This only adds a short prompt section; it never writes
+   * on its own and never forces a call. `false` removes the section entirely.
+   */
+  moodProactive: boolean
 }
 
 /** Every config default in one object: the row schema and the defensive merge both read it. */
@@ -239,6 +266,9 @@ const CONFIG_DEFAULTS: Config = {
   globalIndexPromptBytes: 3 * 1024,
   globalRulesPromptBytes: 12 * 1024,
   globalRoot: '',
+  approveGlobalMemory: true,
+  approvePersonaWrite: true,
+  moodProactive: true,
 }
 
 /** Runtime schema for the row. */
@@ -254,6 +284,9 @@ export const Config: z<Config> = z.object({
   globalIndexPromptBytes: z.number().default(CONFIG_DEFAULTS.globalIndexPromptBytes),
   globalRulesPromptBytes: z.number().default(CONFIG_DEFAULTS.globalRulesPromptBytes),
   globalRoot: z.string().default(CONFIG_DEFAULTS.globalRoot),
+  approveGlobalMemory: z.boolean().default(CONFIG_DEFAULTS.approveGlobalMemory),
+  approvePersonaWrite: z.boolean().default(CONFIG_DEFAULTS.approvePersonaWrite),
+  moodProactive: z.boolean().default(CONFIG_DEFAULTS.moodProactive),
 })
 
 /** The resolved state of one workspace's memory store. */
@@ -348,6 +381,9 @@ export function apply(ctx: Context, config: Config): void {
   const moodMaxAgeHours = config.moodMaxAgeHours
   const globalIndexPromptBytes = config.globalIndexPromptBytes
   const globalRulesPromptBytes = config.globalRulesPromptBytes
+  const approveGlobalMemory = config.approveGlobalMemory
+  const approvePersonaWrite = config.approvePersonaWrite
+  const moodProactive = config.moodProactive
   const fs = ctx.fs
   const agents = ctx.agents
   const prompt = ctx.systemPrompt
@@ -1858,6 +1894,36 @@ export function apply(ctx: Context, config: Config): void {
     },
   }), 'workspace-conventions.mood')
 
+  // The mood layer is only a tool: nothing is written unless the model decides
+  // to call `mood_set`. This section is the one thing the plugin can do about
+  // that — name the moments worth recording, and say explicitly that a quiet
+  // turn is not worth a write. It renders switches and caches only, so it stays
+  // synchronous like every provider here and costs 0 tokens when off.
+  ctx.effect(() => prompt.context({
+    name: 'workspace-mood-maintenance',
+    order: 53,
+    text: (assembly: { readonly agent?: unknown }) => {
+      try {
+        const agent = assembly.agent
+        const workspace = workspaceOf(agent)
+        if (workspace === undefined) return ''
+        const session = sessionOf(agent)
+        if (session !== undefined) sessions.set(workspace, session)
+        if (!moodProactive || !layerOn(workspace, 'mood')) return ''
+        // "No record yet" may only be claimed after both scopes were probed and
+        // both came back empty. An unprobed store stays silent rather than
+        // inviting a duplicate first write on the warm-up turn.
+        const local = moodCache.get(workspace)
+        const shared = globalCache.mood
+        const missingRecord = local === null
+          && (inheritOn(workspace, 'mood')
+            ? shared !== undefined && shared === null
+            : true)
+        return renderMoodMaintenanceSection({ missingRecord })
+      } catch { return '' }
+    },
+  }), 'workspace-conventions.mood-maintenance')
+
   ctx.effect(() => prompt.context({
     name: 'global-rules',
     order: 54,
@@ -1982,6 +2048,48 @@ export function apply(ctx: Context, config: Config): void {
       ctx.logger.warn(message)
     }, (workspace) => layerOn(workspace, 'skills'))
   }), 'workspace-conventions.skills')
+
+  /**
+   * Write-approval gate for the two stores whose mistakes travel.
+   *
+   * The decision is pure (`approvalRequestFor`); this listener only resolves the
+   * workspace switches and routes the answer through DSH's approval seam. It
+   * calls `next()` first and turns only a plain allow into an ask, so a stricter
+   * downstream decision — a deny, a cancel, or another plugin's own ask — is
+   * preserved instead of being overridden.
+   *
+   * Only the three gated names are probed: every other tool call is forwarded
+   * without an await, so the gate costs nothing on unrelated work. With approval
+   * policy `never` (or no answerer) DSH deterministically denies the ask and the
+   * tool body never runs, which is the intended fail-closed behaviour.
+   */
+  ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
+    if (exec.name !== 'memory_write' && exec.name !== 'memory_promote' && exec.name !== 'persona_write') return next()
+    // A workspace whose layer is off — or whose global scope is blocked —
+    // refuses the call in its own body with a message naming the switch, so the
+    // gate stays silent instead of asking the user to approve a doomed write.
+    const workspace = exec.agent === undefined ? undefined : workspaceOf(exec.agent)
+    const layers = workspace === undefined ? DEFAULT_LAYERS : (await configFor(workspace)).layers
+    const request = approvalRequestFor(
+      { name: exec.name, arguments: exec.arguments },
+      {
+        globalMemory: approveGlobalMemory,
+        persona: approvePersonaWrite,
+        memoryWritable: layers.memory === 'enabled',
+        inheritMemory: layers.inherit.memory,
+        personaEnabled: layers.persona,
+        inheritPersona: layers.inherit.persona,
+      },
+    )
+    if (request === undefined) return next()
+    const decision = await next()
+    if (decision.kind !== 'allow') return decision
+    return {
+      kind: 'ask',
+      reason: request.reason,
+      displayReason: { en: request.displayReason.en, zh: request.displayReason.zh },
+    }
+  })
 
   /**
    * The workspace-relative path a file-touching tool call reached, or
