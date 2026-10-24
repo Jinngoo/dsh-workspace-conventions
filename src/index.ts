@@ -252,21 +252,21 @@ export interface Config {
    */
   globalRoot: string
   /**
-   * Require a one-time user approval before a write to the GLOBAL memory scope
-   * (`memory_write` / `memory_promote` with `scope: "global"`).
+   * Request a one-time user approval before a write to the GLOBAL memory scope.
    *
-   * Global memory is injected into every workspace, so it is the one memory
-   * store whose mistakes travel. The approval prompt carries a bounded excerpt
-   * of the entry; a rejection means the tool body never runs.
+   * The name says request, not allow: the plugin can only ask, while the
+   * session's approval policy decides whether the ask is presented (`ask`) or
+   * deterministically refused (`never`), and the file sandbox decides whether the
+   * write can succeed at all. `false` skips the ask entirely and the write goes
+   * through whenever the sandbox permits it.
    */
-  approveGlobalMemory: boolean
+  requestGlobalMemoryApproval: boolean
   /**
-   * Require a one-time user approval before ANY `persona_write`, in either
+   * Request a one-time user approval before ANY `persona_write`, in either
    * scope. Persona is identity prose injected every turn, and a workspace
-   * fragment can be as costly as a global one; `false` restores the old
-   * tool-only behaviour.
+   * fragment can be as costly as a global one; `false` skips the ask.
    */
-  approvePersonaWrite: boolean
+  requestPersonaWriteApproval: boolean
   /**
    * Encourage the model to update the workspace mood opportunistically while
    * the mood layer is on. This only adds a short prompt section; it never writes
@@ -289,8 +289,8 @@ const CONFIG_DEFAULTS: Config = {
   globalMemoryBytes: 4 * 1024,
   globalRulesPromptBytes: 12 * 1024,
   globalRoot: '',
-  approveGlobalMemory: true,
-  approvePersonaWrite: true,
+  requestGlobalMemoryApproval: true,
+  requestPersonaWriteApproval: true,
   moodProactive: true,
 }
 
@@ -308,8 +308,8 @@ export const Config: z<Config> = z.object({
   globalMemoryBytes: z.number().default(CONFIG_DEFAULTS.globalMemoryBytes),
   globalRulesPromptBytes: z.number().default(CONFIG_DEFAULTS.globalRulesPromptBytes),
   globalRoot: z.string().default(CONFIG_DEFAULTS.globalRoot),
-  approveGlobalMemory: z.boolean().default(CONFIG_DEFAULTS.approveGlobalMemory),
-  approvePersonaWrite: z.boolean().default(CONFIG_DEFAULTS.approvePersonaWrite),
+  requestGlobalMemoryApproval: z.boolean().default(CONFIG_DEFAULTS.requestGlobalMemoryApproval),
+  requestPersonaWriteApproval: z.boolean().default(CONFIG_DEFAULTS.requestPersonaWriteApproval),
   moodProactive: z.boolean().default(CONFIG_DEFAULTS.moodProactive),
 })
 
@@ -432,8 +432,8 @@ export function apply(ctx: Context, config: Config): void {
   const globalIndexPromptBytes = config.globalIndexPromptBytes
   const globalMemoryBytes = config.globalMemoryBytes
   const globalRulesPromptBytes = config.globalRulesPromptBytes
-  const approveGlobalMemory = config.approveGlobalMemory
-  const approvePersonaWrite = config.approvePersonaWrite
+  const requestGlobalMemoryApproval = config.requestGlobalMemoryApproval
+  const requestPersonaWriteApproval = config.requestPersonaWriteApproval
   const moodProactive = config.moodProactive
   const fs = ctx.fs
   const agents = ctx.agents
@@ -1074,6 +1074,30 @@ export function apply(ctx: Context, config: Config): void {
     return service === undefined ? undefined : service as EscalationApprover<never, never>
   }
 
+  /**
+   * The session's current approval policy, when the approval service exposes it.
+   *
+   * The policy — not this plugin — decides whether an `ask` can be presented at
+   * all: `never` refuses every ask deterministically. Reading it here lets the
+   * gate explain that instead of surfacing the generic "the user rejected tool".
+   * The effective value is the session's own `approval/policy` override first,
+   * then the deployment default.
+   */
+  const currentApprovalPolicy = (agent: unknown): 'ask' | 'never' | undefined => {
+    const service = (ctx as unknown as { get?: (key: string) => unknown }).get?.('approval') as
+      | {
+        readonly config?: { readonly policy?: unknown }
+        overrideOf?: (session: unknown) => unknown
+      }
+      | undefined
+    const session = sessionOf(agent)
+    const override = service?.overrideOf !== undefined && session !== undefined
+      ? service.overrideOf(session)
+      : undefined
+    const policy = override ?? service?.config?.policy
+    return policy === 'ask' || policy === 'never' ? policy : undefined
+  }
+
   /** Whether a tool call carries a complete sandbox-escalation argument pair. */
   const hasEscalationArgs = (args: unknown): boolean => {
     if (typeof args !== 'object' || args === null) return false
@@ -1081,6 +1105,10 @@ export function apply(ctx: Context, config: Config): void {
     return typeof record.sandbox_permissions === 'string' && record.sandbox_permissions.length > 0
       && typeof record.justification === 'string' && record.justification.trim().length > 0
   }
+
+  /** The row-config key that controls the ask for one gated tool. */
+  const requesterSwitch = (toolName: string): string =>
+    toolName === 'persona_write' ? 'requestPersonaWriteApproval' : 'requestGlobalMemoryApproval'
 
   /**
    * The sandbox policy one global write runs under.
@@ -2505,8 +2533,8 @@ export function apply(ctx: Context, config: Config): void {
     const request = approvalRequestFor(
       { name: exec.name, arguments: exec.arguments },
       {
-        globalMemory: approveGlobalMemory,
-        persona: approvePersonaWrite,
+        globalMemory: requestGlobalMemoryApproval,
+        persona: requestPersonaWriteApproval,
         escalation: hasEscalationArgs(exec.arguments),
         memoryWritable: layers.memory === 'enabled',
         inheritMemory: layers.inherit.memory,
@@ -2517,6 +2545,18 @@ export function apply(ctx: Context, config: Config): void {
     if (request === undefined) return next()
     const decision = await next()
     if (decision.kind !== 'allow') return decision
+    // `never` cannot present an ask at all, so DSH would refuse it with the
+    // generic "the user rejected tool" text. Say what actually happened instead:
+    // the ask was never shown, and here is how to change that.
+    if (currentApprovalPolicy(exec.agent) === 'never') {
+      const switchName = requesterSwitch(exec.name)
+      return {
+        kind: 'deny',
+        reason: `本会话的审批策略是 never（完全权限或自动模式），无法弹出一次性同意，因此这次写入被拒绝。`
+          + `可改用会询问的权限组合（如「工作区内修改」，或 Custom 的 danger-full-access + ask），`
+          + `或把 profile 行配置 ${switchName} 设为 false 后重试。`,
+      }
+    }
     return {
       kind: 'ask',
       reason: request.reason,

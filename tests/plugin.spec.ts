@@ -225,7 +225,7 @@ describe('the approval gate wiring', () => {
   })
 
   it('asks before a global memory_write although the harness config omits the approval switches', async () => {
-    // The harness passes no `approveGlobalMemory` key: the row's defensive merge
+    // The harness passes no `requestGlobalMemoryApproval` key: the row's defensive merge
     // must default it to true, otherwise this cross-workspace write slips past.
     const decision = await harness().preExecute(pending({ scope: 'global', content: '记住发布日' }))
     expect(decision).toMatchObject({ kind: 'ask' })

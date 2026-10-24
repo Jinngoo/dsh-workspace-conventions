@@ -41,8 +41,8 @@ export interface GatedToolCall {
 /**
  * The resolved switches the gate needs, all supplied by the caller.
  *
- * The approval switches are the row's own config (`approveGlobalMemory`,
- * `approvePersonaWrite`); the layer switches come from the workspace's
+ * The approval switches are the row's own config (`requestGlobalMemoryApproval`,
+ * `requestPersonaWriteApproval`); the layer switches come from the workspace's
  * `.dsh/workspace.yml`. Keeping them in one flat object makes the gate total and
  * lets a test exercise any branch without composing a context.
  */

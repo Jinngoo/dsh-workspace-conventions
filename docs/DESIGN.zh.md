@@ -62,8 +62,8 @@ kind: "package-reference"
     globalRulesPromptBytes: 12288
     globalRoot: ''          # 空 = 跟随 $DSH_HOME，再退 ~/.dsh
     # 0.6.0：写入审批与情绪维护（行配置，不能写进 .dsh/workspace.yml）
-    approveGlobalMemory: true
-    approvePersonaWrite: true
+    requestGlobalMemoryApproval: true
+    requestPersonaWriteApproval: true
     moodProactive: true
 ```
 
@@ -81,8 +81,8 @@ kind: "package-reference"
 | `globalMemoryBytes` | `4096` | **0.7.0 新增**：全局长期画像 `MEMORY.md` 的存储硬预算；新增/重写超预算会被拒绝并提示先精简。 |
 | `globalRulesPromptBytes` | `12288` | 全局规则段落预算，与工作区规则分开。 |
 | `globalRoot` | `''` | 全局作用域根；空则跟随 `$DSH_HOME`，再退 `~/.dsh`。 |
-| `approveGlobalMemory` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 在工具体执行前请求一次性审批（带 `sandbox_permissions` 的调用由 escalation 审批合并）；`false` 关闭该门。**行配置**，不能写进 `.dsh/workspace.yml`。 |
-| `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）请求一次性审批；`false` 关闭该门。行配置。 |
+| `requestGlobalMemoryApproval` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 在工具体执行前请求一次性审批（带 `sandbox_permissions` 的调用由 escalation 审批合并）；`false` 关闭该门。**行配置**，不能写进 `.dsh/workspace.yml`。 |
+| `requestPersonaWriteApproval` | `true` | `persona_write`（工作区与全局两个作用域）请求一次性审批；`false` 关闭该门。行配置。 |
 | `moodProactive` | `true` | 是否注入 `workspace-mood-maintenance`（「情绪维护」）段落；还要求工作区 `mood` 层开着。行配置。 |
 
 最后三行是 **0.6.0 新增**的布尔开关，默认全 `true`。它们和字节预算同一条边界：属于 profile 组合里的**行配置**，一旦写进项目级 `.dsh/workspace.yml` 就会命中未知键错误（报错并停用所有层）。项目级能决定的仍是各层是否启用（`layers.*`）与是否继承全局（`inherit.*`）。
@@ -105,7 +105,7 @@ kind: "package-reference"
 | `rule_status` | 报告工作区与全局两套规则册的清单、分类、触发 glob 与已触发状态。 |
 | `rule_read` | 读取一册规则的完整正文（绕过 16 KB 注入上限）；`scope` 选作用域。 |
 | `persona_read` | 列人格片段清单或读某一片段全文（工作区同名遮蔽全局）。 |
-| `persona_write` | 写人格片段（`replace` / `append`）；密钥与 PII 硬拒，超预算硬拒；两个作用域都先要一次性审批（`approvePersonaWrite`）。 |
+| `persona_write` | 写人格片段（`replace` / `append`）；密钥与 PII 硬拒，超预算硬拒；两个作用域都先要一次性审批（`requestPersonaWriteApproval`）。 |
 | `mood_get` | 读情绪原始状态与衰减后视图（年龄、权重、是否已平复、生效来源）。 |
 | `mood_set` | 写情绪状态，自动记 `updated`；只覆盖当前状态，不写历史。 |
 
