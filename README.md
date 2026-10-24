@@ -61,15 +61,26 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 
 **日期流水有两种真实布局**：平铺（`memory/YYYY-MM-DD.md`）与按计算机名分目录（`memory/<计算机名>/YYYY-MM-DD.md`）。本行不假定是哪种，而是按目录的实际形状探测：一旦目录里出现装着日期文件的计算机名子目录，新流水就写进本机 `hostname` 对应目录；检索覆盖全部机器的目录；读取某一天时依次取本机、记忆目录根，只在其他机器唯一命中时才采用它。
 
-### 写入审批（全局作用域）
+### 全局记忆：单文件长期画像（0.7.0）
 
-工作区记忆写入是普通工具调用；**全局记忆写入要先经一次审批**：`memory_write(scope="global")` 与 `memory_promote(scope="global")` 在工具体执行前，经 DSH 的 approval seam 向用户要一次同意（行配置 `approveGlobalMemory` 默认 `true`）。
+全局记忆与工作区记忆是**两种形态**：工作区记忆是「索引 + 日期流水」（追加、按天）；全局记忆是一份**长期用户画像**——`$DSH_HOME/memory/MEMORY.md`，按章节（`## 关于用户`、`## 偏好与习惯`、`## 要求与规则`、`## 长期约定`）组织条目（`- [preference] …`），每轮整篇注入，**不按天分册、不靠追加膨胀**。
 
-- **只有「允许这一次」**：拒绝、取消、或部署里没有应答方时，DSH 直接拒绝该调用，**工具体从未执行、什么都不会写**；会话审批策略 `never` 同样是确定性拒绝，模型会看到可读的拒绝原因。没有"总是允许"——跨工作区即时可见的内容，每笔都单独批准。
-- 审批提示里是**有界摘要**：内容前约 60 个字符，够判断"这是不是我刚写的那条"，又不把整段流水铺进审批界面。
+- **写什么**：身份背景、稳定偏好、明确要求、长期约定（`preference` / `constraint` / `convention` / `decision` 四类）；项目现状、一次性发现、排错流水留在工作区记忆。
+- **怎么改**：`memory_write(scope="global", section=…)` 新增单条（幂等，重复不写）；`memory_revise` **整篇重写**——先 `memory_read(scope="global")` 读现文，把新事实融合进已有条目、删掉过时或重复内容、改写措辞，再提交全文，这是防膨胀的常规做法；`memory_promote(scope="global")` 把工作区里值得长期保留的条目提升进画像。
+- **防膨胀**：`globalMemoryBytes`（默认 4 KB）是硬上限，新增/重写超预算会被拒绝并提示先精简；`globalIndexPromptBytes`（默认 4 KB）是注入上限，超出时截断并提示用 `memory_read`。
+- **从 0.6.x 升级**：旧的全局日期流水不再被读取（`memory_read(layer="ledger", scope="global")` 会说明）；把 `$DSH_HOME/memory/` 下的 `YYYY-MM-DD.md` 手工并入 `MEMORY.md` 后移入 `archive/` 即可。
+
+### 写入审批与按次升级
+
+工作区记忆写入是普通工具调用；**全局写入要先经一次审批**：`memory_write` / `memory_promote` / `memory_revise` 的全局作用域，以及 `persona_write`（工作区与全局两个作用域），在工具体执行前经 DSH 的 approval seam 请求**一次性**同意（行配置 `approveGlobalMemory` / `approvePersonaWrite` 默认 `true`）。
+
+- **同意 ≠ 授权**：审批通过不改变文件沙箱策略。`$DSH_HOME` 在工作区之外，所以「工作区内修改」模式下即使点了允许也写不进去——要让允许真正生效，调用需带 `sandbox_permissions: "danger-full-access"` + `justification`，走 DSH 的 **sandbox escalation（按次升级）** 通道：批准后**仅这一次**放宽，会话权限模式不变。
+- **合并成一次弹窗**：带升级参数的调用由 escalation 审批作为唯一一次同意，`approveGlobalMemory` / `approvePersonaWrite` 的同意闸门不再重复询问。
+- **只有「允许这一次」**：拒绝、取消、部署里没有应答方、或会话审批策略 `never`，都是确定性拒绝，**工具体从未执行、什么都不会写**。没有"总是允许"。
+- 审批提示里是**有界摘要**（内容前约 60 个字符），不是整段内容。
 - **不受影响**：工作区作用域的写入、`mood_set`、以及全部读取工具。
 - 已经被项目开关挡住的情况**不会先问审批**：`memory` 为 `read-only` / `disabled`、或 `inherit.memory: false` 时，工具自己的拒绝就是答案。
-- **要关掉这道门**：把行配置 `approveGlobalMemory` 设为 `false` 即可——但它对该 profile 的所有工作区生效，属于部署策略，**不能写进 `.dsh/workspace.yml`**（见[行配置（profile）](#行配置profile审批与情绪维护的开关)）。
+- **要关掉这道门**：把行配置 `approveGlobalMemory` / `approvePersonaWrite` 设为 `false` 即可——但它对该 profile 的所有工作区生效，属于部署策略，**不能写进 `.dsh/workspace.yml`**（见[行配置（profile）](#行配置profile审批与情绪维护的开关)）。
 
 ## 人格（persona）
 
@@ -129,12 +140,12 @@ updated: 2026-10-23T00:12:00+08:00
 |---|---|---|
 | 人格 | `$DSH_HOME/persona/*.md` | ✅ 按片段名 |
 | 情绪 | `$DSH_HOME/mood/current.md` | ✅ 取最新一份（不是遮蔽） |
-| 记忆 | `$DSH_HOME/memory/`（索引 + 日期流水，布局探测同工作区） | ❌ 两段独立注入 |
+| 记忆 | `$DSH_HOME/memory/MEMORY.md`（单文件长期画像：章节 + 条目） | ❌ 两段独立注入 |
 | 规则 | `$DSH_HOME/rules/*.md`（`alwaysApply` / `paths` 同语义） | ✅ 按文件名 |
 
 - 全局根默认就是 `$DSH_HOME`（`~/.dsh`），可用行配置 `globalRoot` 整体搬家——`$DSH_HOME/{persona,mood,memory,rules}` 目前没有其它机制占用，但记忆/人格这类名字未来被 DSH 或别的插件征用并非不可能，这个配置就是为此留的逃生门。
-- 全局写入落在工作区之外：`workspace-write` 策略会拒绝，工具会返回原因与替代方案（改 `scope="workspace"`，或放宽策略）。`danger-full-access` 下可写。
-- 即便沙箱放行，全局记忆与人格写入仍各有一道**一次性审批**（见上文「写入审批」）——审批不是许可，而是同意；无应答方时按拒绝处理。
+- 全局写入落在工作区之外：`workspace-write` 策略会拒绝。工具会先预检并在不可写时返回可读原因；要让写入真正生效，调用需带 `sandbox_permissions: "danger-full-access"` + `justification` 走**按次升级**（仅该次调用放宽，会话权限模式不变），或在 `danger-full-access` 会话里直接写。
+- 即便沙箱放行，全局写入仍受一道**一次性审批**（`approveGlobalMemory` / `approvePersonaWrite`，见上文「写入审批与按次升级」）；带升级参数的调用由 escalation 审批合并成一次弹窗。
 - 全局记忆的准入比工作区更严：只接受 `preference` / `constraint` / `convention` / `decision` 四类，项目一次性发现留在工作区。
 
 ## 规则
@@ -167,7 +178,7 @@ updated: 2026-10-23T00:12:00+08:00
 package.json          # 包清单；dsh.bundle.patch 是「可被管理器安装的 Bundle」的入场券
 cordis.patch.yml      # Bundle 载荷：把 workspace-conventions 这一行插进 profile 的层栈
 tsconfig.json         # 独立严格配置（对齐 harness 的 tsconfig.base.json 开关）
-src/index.ts          # 装配层：配置、13 个工具、7 个 prompt 段落、技能 provider、触碰追踪
+src/index.ts          # 装配层：配置、14 个工具、7 个 prompt 段落、技能 provider、触碰追踪
 src/scope.ts          # 双层作用域：全局根解析、各层目录、路径包含判断
 src/persona.ts        # 人格片段（纯逻辑）：解析、排序、遮蔽合并、预算渲染
 src/mood.ts           # 情绪状态（纯逻辑）：解析/生成、半衰期衰减、确定性渲染、「情绪维护」段落文本
@@ -228,15 +239,17 @@ workspace-conventions:
 
 `pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
 
-### 行配置（profile）：审批与情绪维护的开关
+### 行配置（profile）：审批、预算与情绪维护
 
-0.6.0 新增的三个键是**行配置**（profile 组合里 `workspace-conventions` 那一行的 `config:`），**不是这份项目文件里的键**：
+这些键是**行配置**（profile 组合里 `workspace-conventions` 那一行的 `config:`），**不是这份项目文件里的键**：
 
 | 键 | 默认 | 作用 |
 |---|---|---|
-| `approveGlobalMemory` | `true` | `scope="global"` 的 `memory_write` / `memory_promote` 是否先要一次性审批 |
+| `approveGlobalMemory` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 是否先要一次性审批（带 `sandbox_permissions` 的调用由 escalation 审批合并，不再重复问） |
 | `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）是否先要一次性审批 |
 | `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
+| `globalMemoryBytes` | `4096` | 全局长期画像 `MEMORY.md` 的**存储硬预算**（0.7.0 新增）；超出的写入/重写被拒绝并提示先精简 |
+| `globalIndexPromptBytes` | `4096` | 全局画像的**注入上限**；超出时截断并提示用 `memory_read` 读全文 |
 
 边界是刻意的：行配置随 profile 生效、对该 profile 的所有工作区一致，属于**部署策略**；`.dsh/workspace.yml` 只说"这个项目里层开不开、是否继承全局"（`layers.*` / `inherit.*`）。把上面三个键写进 `.dsh/workspace.yml` 会命中**未知键**错误——报错并停用所有层，正是为了让"以为按项目关了审批"不可能悄悄发生。
 
@@ -254,7 +267,7 @@ workspace-conventions:
 | `.dsh/mood/` | 本插件（工作区情绪） | `mood` | — |
 | `.workbuddy/rules/` | 本插件（工作区规则唯一来源） | `rules` | — |
 | `.workbuddy/skills/` | 本插件 → 原生技能目录 | `skills` | — |
-| `$DSH_HOME/memory/` | 本插件（全局记忆） | `memory` | `memory` |
+| `$DSH_HOME/memory/MEMORY.md` | 本插件（全局记忆：单文件长期画像） | `memory` | `memory` |
 | `$DSH_HOME/persona/` | 本插件（全局人格） | `persona` | `persona` |
 | `$DSH_HOME/mood/` | 本插件（全局情绪） | `mood` | `mood` |
 | `$DSH_HOME/rules/` | 本插件（全局规则） | `rules` | `rules` |
@@ -276,10 +289,10 @@ workspace-conventions:
 
 | 开关 | 提示段落 | 工具调用 | 实际效果 |
 |---|---|---|---|
-| `memory` 缺省（`enabled`） | 注入工作区索引（有全局内容时另注入全局索引） | 六个工具全部可用，`scope` 可选 | 读写都走探测到的后端 |
-| `memory: read-only` | **不注入** | 读与诊断可用；`memory_write` / `memory_promote` 被拒并说明原因 | 只读 |
-| `memory: false` / `disabled` | 不注入 | 六个工具**全部**被拒 | 不读不写 |
-| `inherit.memory: false` | 全局索引不注入 | `scope="global"` 被拒；工作区记忆照常 | 屏蔽全局 |
+| `memory` 缺省（`enabled`） | 注入工作区索引（有全局画像内容时另注入全局画像） | 记忆工具全部可用，`scope` 可选 | 读写都走探测到的后端 |
+| `memory: read-only` | **不注入** | 读与诊断可用；`memory_write` / `memory_promote` / `memory_revise` 被拒并说明原因 | 只读 |
+| `memory: false` / `disabled` | 不注入 | 全部记忆工具**被拒** | 不读不写 |
+| `inherit.memory: false` | 全局画像不注入 | `scope="global"` 被拒；工作区记忆照常 | 屏蔽全局 |
 | `persona` 缺省 | 注入 `## 人格`（全局 + 工作区，同名遮蔽） | `persona_read` / `persona_write` 可用 | 多片段合并 |
 | `persona: false` | 不注入 | 两个工具被拒 | 不读不写 |
 | `inherit.persona: false` | 只注入工作区片段 | 可写全局人格被拒 | 屏蔽全局人格 |
@@ -393,20 +406,20 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 
 ## 已知限制（当前版本）
 
-- **全局写入受沙箱策略约束**：`$DSH_HOME` 在工作区之外，`workspace-write` 下写入被拒（工具会说明并建议 `scope="workspace"`）；`danger-full-access` 或把该路径纳入允许范围时才能写。
-- **写入审批只覆盖本插件的工具**：模型仍可用通用 `write` / `edit` 直接改 `$DSH_HOME/persona`、mood 文件——那两条工具没有接审批。把通用文件工具纳入统一门禁是 phase 2 的工作；0.6.0 只保证"经本插件写入"这条路可审计，不假装它是完整边界。
-- **审批没有"总是允许"**：每笔全局记忆/人格写入都要单独批准；会话审批策略 `never`、或部署没有任何应答方时，一律确定性拒绝（fail-closed），模型看到可读的拒绝原因。
+- **全局写入受沙箱策略约束**：`$DSH_HOME` 在工作区之外，`workspace-write` 下写入被拒。工具会先预检并给出可读原因；带 `sandbox_permissions: "danger-full-access"` + `justification` 可走**按次升级**（仅该次调用放宽），或在 `danger-full-access` 会话里直接写。
+- **写入审批只覆盖本插件的工具**：模型仍可用通用 `write` / `edit` 直接改 `$DSH_HOME/persona`、mood 文件——那两条工具没有接审批。把通用文件工具纳入统一门禁是 phase 2 的工作；0.7.0 只保证"经本插件写入"这条路可审计，不假装它是完整边界。
+- **审批没有"总是允许"**：每笔全局记忆/人格写入都要单独批准（或走一次 escalation 授权）；会话审批策略 `never`、或部署没有任何应答方时，一律确定性拒绝（fail-closed），模型看到可读的拒绝原因。
 - **`moodProactive` 是行配置**：单个项目无法只关「情绪维护」而保留情绪层——`.dsh/workspace.yml` 里只有 `mood` / `inherit.mood`；按项目控制只能整体关 `mood`。
 - **情绪维护只是鼓励**：prompt 段落表达不了"必须调用工具"，也没有每轮自动写入；真自动化需要一个常驻循环（daemon-loop）插件，本行不做。
 - **全局层在本进程内缓存**：外部直接改 `$DSH_HOME/{persona,mood,memory,rules}` 不会实时生效，要等下一个新会话（`agent/created` 会重读）、经工具的一次写入，或重启进程。
 - 写入是整文件读—改—写，**无锁**；同一工作区并发写可能丢一次写入（全局层同此，且跨工作区共享，风险更高）。
 - 工作区缓存冷启动会先渲染**一轮预热提示**（因为 prompt provider 契约要求同步返回）；规则段落在冷却时渲染空串而非提示。
-- 索引注入有 7000 字节上限（`indexPromptBytes`），全局索引用 `globalIndexPromptBytes`（默认 3 KB），超出部分需用 `memory_read` 读。
+- 索引注入有 7000 字节上限（`indexPromptBytes`）；全局章节是单文件画像，存储预算是 `globalMemoryBytes`（默认 4 KB），注入上限是 `globalIndexPromptBytes`（默认 4 KB），超出部分需用 `memory_read` 读。
 - 人格/情绪/规则都**没有 watcher**：外部编辑在下一个新会话或下一次工具写入时才被看到。
 - 情绪的衰减在**渲染时**计算，不落盘；`current.md` 只有一个当前状态，不保留历史。
 - 后端按目录**存在性**选择：中途创建 `.workbuddy/memory` 会切后端，已写入 `.dsh/memory` 的记忆**不会迁移**。
 - 流水布局按**目录形状**探测：出现装着日期文件的计算机名子目录即切到「按本机目录读写」，子目录清空后回落平铺。计算机名取 `hostname` 输出；已有目录按「精确同名优先、其次忽略大小写」复用，因此同一台机器不同大小写的目录名不会被当成两台。
-- 只能新增，**没有删除/过期**工具（记忆与人格都是；情绪可覆盖）。
+- 工作区记忆只能新增，**没有删除/过期**工具（情绪可覆盖）；全局画像可用 `memory_revise` 整篇删除、合并、改写，或直接编辑 `MEMORY.md`。
 - 规则**只认 DSH 的结构化文件工具**（`read` / `write` / `edit` 的 `file_path`）；shell 改文件不触发条件册。
 - 规则触发状态**在进程内累积、不落盘**；会话中途改 rules 文件不重载。
 - 技能**没有 watcher**，且只认**一层深度**（`<name>/SKILL.md`、`<name>.md`）。
@@ -415,6 +428,16 @@ dsh --profile web --dump-config | Select-String workspace-conventions
 设计细节与逐层取舍见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)）。
 
 ## 变更记录
+
+### 0.7.0 — 全局记忆改为单文件长期画像 + 按次升级
+
+- **全局记忆模型重做**：`$DSH_HOME/memory/` 从「索引 + 日期流水」改为**单文件长期画像** `MEMORY.md`（`## 章节` + `- [kind] 条目`），每轮整篇注入，不再按天分册、不再靠追加膨胀。旧日期流水不再读取（升级说明见「记忆」章节）。
+- **新增 `memory_revise` 工具**（scope 仅 global）：整篇重写——先读、把新事实融合进已有条目、删掉过时或重复内容、再提交全文；逐条准入审查 + 字节预算校验。工具数 13 → 14。
+- **新增行配置 `globalMemoryBytes`**（默认 4096）：全局画像的存储硬预算；`globalIndexPromptBytes` 默认从 3 KB 提到 4 KB 作为注入上限。
+- **审批与授权分离**：`memory_write` / `memory_promote` / `memory_revise` / `persona_write` / `mood_set` 增加可选的 `sandbox_permissions` + `justification`，经 DSH 的 `approveEscalation` 走**按次升级**：批准后仅该次调用放宽到 `danger-full-access`，会话权限模式不变；带升级参数时同意闸门不再重复询问（合并为一次弹窗）。
+- **写入可行性预检**：全局写入前先判断当前策略能否写目标路径，不可写时直接返回可读原因与升级指引，不再出现"先同意、再失败"。
+- **迁移**：把旧 `memory/YYYY-MM-DD.md` 手工并入 `MEMORY.md` 后移入 `archive/`；外部编辑仍要等新会话或一次工具写入后才被看到。
+- 测试：311 个用例（新增 global-memory 17 个、approval escalation 相关用例），`pnpm typecheck` / `pnpm test` 全绿。
 
 ### 0.6.0 — 写入审批与情绪维护
 

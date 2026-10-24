@@ -61,14 +61,17 @@ Mount the row in a profile — the patch this package ships inserts it into the 
 
 | Tool | Purpose |
 |---|---|
-| `memory_status` | Report the active backend, resolved paths, index size and available dated ledgers. |
-| `memory_read` | Read the curated index (`layer=index`) or one dated ledger (`layer=ledger`). |
-| `memory_search` | Literal case-insensitive substring search across the index and every ledger. |
-| `memory_write` | Append one durable entry to the dated ledger, after an admission check. |
-| `memory_promote` | Add one line to the curated index under a named section, so it is injected every turn. |
+| `memory_status` | Report the active backend, resolved paths, index size, and the global profile's file, size, entries and budget. |
+| `memory_read` | Read the curated index (`layer=index`) or one dated ledger (`layer=ledger`) for a workspace; `scope=global` reads the whole profile. |
+| `memory_search` | Literal case-insensitive substring search across the index, every ledger, and the global profile. |
+| `memory_write` | Append one durable entry to the workspace dated ledger, after an admission check; `scope=global` adds an entry to a profile section. |
+| `memory_promote` | Add one line to the curated layer under a named section, so it is injected every turn (workspace index or global profile). |
+| `memory_revise` | Rewrite the global profile as a whole (merge, prune, reword) with per-entry admission and a byte budget — the anti-bloat path. |
 | `memory_help` | Explain the criteria and the admission policy currently in force. |
 | `rule_status` | Report the `.workbuddy/rules/` inventory: classification, trigger globs, and which conditional books have fired. |
 | `rule_read` | Read one rule book in full, past the 16 KB injection cap. |
+
+**Global memory is a different shape (0.7.0).** A workspace store is an index plus dated ledgers, because it answers "what happened in this project". The global store answers "who is this user and how should I treat them": it is a single curated document, `$DSH_HOME/memory/MEMORY.md`, holding sections (`## 关于用户`, `## 偏好与习惯`, …) of entries (`- [preference] …`). It is injected whole every turn, never date-partitioned, and once its byte budget (`globalMemoryBytes`, 4 KB by default) is reached a write is refused with a "revise first" hint; `memory_revise` re-reads, merges, prunes and re-emits the document. Global writes require a one-time approval (`approveGlobalMemory`), and a call may carry `sandbox_permissions` + `justification` to request a per-call escalation through DSH's `approveEscalation` — that grant covers the consent for that one call, so only one prompt appears.
 
 Skills get **no** bespoke tool: they enter the ordinary skill catalog and load through the stock `skill` tool.
 

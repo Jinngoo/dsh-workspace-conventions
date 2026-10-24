@@ -20,6 +20,7 @@ import {
 const OPEN: ApprovalPolicy = {
   globalMemory: true,
   persona: true,
+  escalation: false,
   memoryWritable: true,
   inheritMemory: true,
   personaEnabled: true,
@@ -80,6 +81,19 @@ describe('the global memory gate', () => {
     const request = approvalRequestFor(call('memory_promote', { scope: 'global', entry: LONG_CONTENT, section: '约束与红线' }), policy())
     expect(request).toBeDefined()
     expectDigest(request as NonNullable<typeof request>)
+  })
+
+  it('asks before a global memory_revise, with the rewrite digest', () => {
+    const request = approvalRequestFor(call('memory_revise', { content: LONG_CONTENT }), policy())
+    expect(request).toBeDefined()
+    expectDigest(request as NonNullable<typeof request>)
+  })
+
+  it('does not ask when the call already carries an escalation request', () => {
+    const escalation = policy({ escalation: true })
+    expect(approvalRequestFor(call('memory_write', { scope: 'global', content: LONG_CONTENT }), escalation)).toBeUndefined()
+    expect(approvalRequestFor(call('memory_revise', { content: LONG_CONTENT }), escalation)).toBeUndefined()
+    expect(approvalRequestFor(call('persona_write', { name: '02-voice', content: LONG_CONTENT }), escalation)).toBeUndefined()
   })
 
   it('does not ask for a workspace-scoped memory_write', () => {

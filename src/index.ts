@@ -45,6 +45,20 @@ import type {} from '@deepseek-ai/dsh-sandbox-policy'
 import type {} from '@deepseek-ai/dsh-skill'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type { SandboxExecutionPolicy } from '@deepseek-ai/dsh-sandbox'
+import { approveEscalation, validateEscalationArgs, writableRoots, type EscalationApprover } from '@deepseek-ai/dsh-sandbox'
+
+import {
+  GLOBAL_MEMORY_FILE,
+  GLOBAL_MEMORY_TITLE,
+  checkGlobalEntry,
+  flattenEntries,
+  globalMemoryBytes as documentBytes,
+  parseGlobalMemory,
+  reviseGlobalMemory,
+  sectionTitle,
+  upsertGlobalEntry,
+  type GlobalMemoryDocument,
+} from './global-memory.js'
 
 import { DEFAULT_DIR, INDEX_FILE, MEMORY_SUBDIR, RULES_SUBDIR, WORKBUDDY_DIR } from './layout.js'
 import { approvalRequestFor } from './approval.js'
@@ -217,6 +231,14 @@ export interface Config {
   moodMaxAgeHours: number
   /** Byte cap on the global (cross-workspace) memory index section. */
   globalIndexPromptBytes: number
+  /**
+   * Hard byte budget of the single global memory document. The global scope is a
+   * curated long-lived profile, not a date-partitioned ledger: it is injected
+   * every turn and rewritten in place, so an unbounded file would poison both the
+   * context and the user's profile. A write that would exceed this budget is
+   * refused with a "revise first" hint instead of being silently truncated.
+   */
+  globalMemoryBytes: number
   /** Byte cap on the global rules section, kept separate so neither scope starves the other. */
   globalRulesPromptBytes: number
   /**
@@ -263,7 +285,8 @@ const CONFIG_DEFAULTS: Config = {
   moodPromptBytes: 512,
   moodHalfLifeHours: DEFAULT_MOOD_HALF_LIFE_HOURS,
   moodMaxAgeHours: DEFAULT_MOOD_MAX_AGE_HOURS,
-  globalIndexPromptBytes: 3 * 1024,
+  globalIndexPromptBytes: 4 * 1024,
+  globalMemoryBytes: 4 * 1024,
   globalRulesPromptBytes: 12 * 1024,
   globalRoot: '',
   approveGlobalMemory: true,
@@ -282,6 +305,7 @@ export const Config: z<Config> = z.object({
   moodHalfLifeHours: z.number().default(CONFIG_DEFAULTS.moodHalfLifeHours),
   moodMaxAgeHours: z.number().default(CONFIG_DEFAULTS.moodMaxAgeHours),
   globalIndexPromptBytes: z.number().default(CONFIG_DEFAULTS.globalIndexPromptBytes),
+  globalMemoryBytes: z.number().default(CONFIG_DEFAULTS.globalMemoryBytes),
   globalRulesPromptBytes: z.number().default(CONFIG_DEFAULTS.globalRulesPromptBytes),
   globalRoot: z.string().default(CONFIG_DEFAULTS.globalRoot),
   approveGlobalMemory: z.boolean().default(CONFIG_DEFAULTS.approveGlobalMemory),
@@ -328,7 +352,7 @@ interface WorkspaceRulesState {
   readonly rules: readonly RuleDefinition[]
 }
 
-/** One memory store, either the workspace backend or the single global store. */
+/** One workspace memory store (the dated-ledger backend). */
 interface MemoryStoreState {
   /** Absolute store directory. */
   readonly dir: string
@@ -348,6 +372,32 @@ interface MemoryStoreState {
   readonly hostDir: string
   /** Every dated ledger in the store, newest first. */
   readonly ledgers: readonly LedgerFile[]
+}
+
+/**
+ * The resolved state of the GLOBAL memory document.
+ *
+ * Deliberately not a {@link MemoryStoreState}: the global scope is one curated
+ * file injected every turn, not a directory of dated ledgers. Reusing the ledger
+ * shape is what made the old global scope accumulate instead of curate.
+ */
+interface GlobalMemoryState {
+  /** Absolute global memory directory. */
+  readonly dir: string
+  /** Absolute document path (`<dir>/MEMORY.md`). */
+  readonly path: string
+  /** Whether the document exists on disk. */
+  readonly exists: boolean
+  /** Document size in bytes. */
+  readonly bytes: number
+  /** Document text, or `''` when absent. */
+  readonly text: string
+  /** The parsed document. */
+  readonly document: GlobalMemoryDocument
+  /** Every entry, flattened in document order. */
+  readonly entries: readonly { readonly section: string, readonly kind: string, readonly text: string }[]
+  /** Number of non-empty sections. */
+  readonly sections: number
 }
 
 /** The workspace persona fragments plus the issues met while parsing them. */
@@ -380,6 +430,7 @@ export function apply(ctx: Context, config: Config): void {
   const moodHalfLifeHours = config.moodHalfLifeHours
   const moodMaxAgeHours = config.moodMaxAgeHours
   const globalIndexPromptBytes = config.globalIndexPromptBytes
+  const globalMemoryBytes = config.globalMemoryBytes
   const globalRulesPromptBytes = config.globalRulesPromptBytes
   const approveGlobalMemory = config.approveGlobalMemory
   const approvePersonaWrite = config.approvePersonaWrite
@@ -403,7 +454,7 @@ export function apply(ctx: Context, config: Config): void {
    */
   const moodCache = new Map<string, MoodState | null>()
   const globalCache: {
-    memory: MemoryStoreState | undefined
+    memory: GlobalMemoryState | undefined
     rules: readonly RuleDefinition[] | undefined
     persona: readonly PersonaFragment[] | undefined
     mood: MoodState | null | undefined
@@ -482,9 +533,14 @@ export function apply(ctx: Context, config: Config): void {
     } catch { return undefined }
   }
 
-  const writeAt = async (target: string, content: string, session: unknown): Promise<string> => {
+  const writeAt = async (
+    target: string,
+    content: string,
+    session: unknown,
+    policy?: SandboxExecutionPolicy,
+  ): Promise<string> => {
     const t = await fs.resolve(target)
-    await fs.writeText(t, content, undefined, undefined, policyFor(session))
+    await fs.writeText(t, content, undefined, undefined, policy ?? policyFor(session))
     return toPosix(t.displayPath)
   }
 
@@ -625,9 +681,31 @@ export function apply(ctx: Context, config: Config): void {
     return state
   }
 
-  /** Probe the single global memory store into the cache. */
-  const loadGlobalMemory = async (): Promise<MemoryStoreState> => {
-    const { state } = await storeOf(globalLayerDir(globalRoot, 'memory'), 'auto')
+  /**
+   * Read the global memory document into the cache.
+   *
+   * One file, parsed into sections and entries: absent is a normal state (a fresh
+   * profile), not an error. Legacy dated ledgers from the pre-0.7 layout are not
+   * read here — the read tool points at them explicitly so nothing is silently
+   * lost or silently injected.
+   */
+  const loadGlobalMemory = async (): Promise<GlobalMemoryState> => {
+    const dir = globalLayerDir(globalRoot, 'memory')
+    const path = join(dir, GLOBAL_MEMORY_FILE)
+    const raw = await readAt(path)
+    const text = raw === undefined ? '' : normalizeText(raw)
+    const document = parseGlobalMemory(text)
+    const entries = flattenEntries(document)
+    const state: GlobalMemoryState = {
+      dir,
+      path,
+      exists: raw !== undefined,
+      bytes: documentBytes(text),
+      text,
+      document,
+      entries,
+      sections: document.sections.filter((section) => section.entries.length > 0).length,
+    }
     globalCache.memory = state
     return state
   }
@@ -965,32 +1043,90 @@ export function apply(ctx: Context, config: Config): void {
     return best
   }
 
-  /** Render the global memory index section from a cached snapshot. Total: it never throws. */
-  const renderGlobalMemory = (state: MemoryStoreState): string => {
+  /** Render the global long-lived memory section from a cached snapshot. Total: it never throws. */
+  const renderGlobalMemory = (state: GlobalMemoryState): string => {
     const lines = [
       '# 全局记忆（跨工作区，所有工作区共享）',
       '',
-      `- 目录：${toPosix(state.dir)}`,
-      `- 索引：${toPosix(state.index)}（${String(state.bytes)} 字节）`,
-      `- 日期流水：${state.ledgers.length > 0
-        ? state.ledgers.slice(0, 3).map((file) => file.rel).join(', ')
-          + (state.ledgers.length > 3 ? ` 等共 ${String(state.ledgers.length)} 个` : '')
-        : '无'}`,
-      '- 写入更严：只记跨工作区稳定的事实（偏好、约定、决策、硬约束）；某个项目的一次性发现留在工作区记忆。',
-      '- 工具：memory_read / memory_search / memory_write / memory_promote 均支持 scope="global"。',
+      `- 文件：${toPosix(state.path)}（${String(state.bytes)}/${String(globalMemoryBytes)} 字节，`
+      + `${String(state.entries.length)} 条 / ${String(state.sections)} 个章节）`,
+      '- 这里只放长期有效的用户画像：身份与背景、稳定偏好、明确要求、长期约定；项目现状、一次性发现、排错流水留在工作区记忆。',
+      '- 新增单条用 memory_write(scope="global", section, kind)；整理（融合、删减、改写，防止膨胀）用 memory_revise；',
+      '- 工作区里值得长期保留的条目用 memory_promote 提升；读取用 memory_read(scope="global")。',
       '',
-      '当前索引原文',
+      '当前内容',
       '',
     ]
-    if (state.hasIndex && state.indexText.length > 0) {
-      const body = normalizeText(state.indexText)
+    if (state.entries.length > 0) {
+      const body = normalizeText(state.text)
       lines.push(body.length > globalIndexPromptBytes
-        ? `${body.slice(0, globalIndexPromptBytes)}\n\n…（全局索引过长已截断，完整内容用 memory_read(scope="global")）`
+        ? `${body.slice(0, globalIndexPromptBytes)}\n\n…（全局记忆过长已截断，完整内容用 memory_read(scope="global")）`
         : body)
     } else {
-      lines.push('（暂无全局记忆。跨工作区稳定的事实可用 memory_write(scope="global") 写入。）')
+      lines.push('（暂无全局记忆。长期有效的用户信息、要求与习惯可用 memory_write(scope="global") 写入。）')
     }
     return lines.join('\n')
+  }
+
+  /** The approval service used for a per-call sandbox escalation, when composed. */
+  const approvalService = (): EscalationApprover<never, never> | undefined => {
+    const service = (ctx as unknown as { get?: (key: string) => unknown }).get?.('approval')
+    return service === undefined ? undefined : service as EscalationApprover<never, never>
+  }
+
+  /** Whether a tool call carries a complete sandbox-escalation argument pair. */
+  const hasEscalationArgs = (args: unknown): boolean => {
+    if (typeof args !== 'object' || args === null) return false
+    const record = args as { readonly sandbox_permissions?: unknown, readonly justification?: unknown }
+    return typeof record.sandbox_permissions === 'string' && record.sandbox_permissions.length > 0
+      && typeof record.justification === 'string' && record.justification.trim().length > 0
+  }
+
+  /**
+   * The sandbox policy one global write runs under.
+   *
+   * Two independent gates decide a global write: the session's standing policy
+   * decides whether `$DSH_HOME` is writable at all, and DSH's escalation seam
+   * decides whether this single call may temporarily widen that policy. An
+   * escalation argument pair that is not strictly wider than the standing mode is
+   * left to the seam, which fails closed with a readable reason.
+   */
+  const writePolicyFor = async (
+    toolName: string,
+    args: { readonly sandbox_permissions?: string, readonly justification?: string },
+    exec: ToolExecution,
+  ): Promise<SandboxExecutionPolicy | undefined> => {
+    validateEscalationArgs(args.sandbox_permissions, args.justification)
+    const agent = exec.agent ?? agentNow()
+    const standing = policyFor(sessionOf(agent))
+    if (args.sandbox_permissions === undefined || args.justification === undefined) return standing
+    if (standing === undefined || standing.mode === 'danger-full-access') return standing
+    const approved = await approveEscalation(
+      {
+        requestedMode: args.sandbox_permissions,
+        justification: args.justification,
+        effectiveMode: standing.mode,
+        subject: 'operation',
+      },
+      {
+        approver: approvalService(),
+        agent: agent as never,
+        callId: exec.callId as never,
+        toolName,
+        ...exec.signal === undefined ? {} : { signal: exec.signal },
+      },
+    )
+    return { ...standing, mode: approved }
+  }
+
+  /** Whether one policy can write an absolute path (`undefined` means unsandboxed). */
+  const policyWritable = (policy: SandboxExecutionPolicy | undefined, target: string): boolean => {
+    if (policy === undefined) return true
+    if (policy.mode === 'danger-full-access') return true
+    return writableRoots(policy).some((root) => {
+      const rel = relative(root, target)
+      return rel.length === 0 || (!rel.startsWith('..') && !isAbsolute(rel))
+    })
   }
 
   /** Normalize a tool's optional `scope` argument. */
@@ -1018,13 +1154,6 @@ export function apply(ctx: Context, config: Config): void {
     return undefined
   }
 
-  /** The store a memory tool reads or writes, resolved per scope. */
-  const storeFor = async (
-    workspace: string,
-    scope: 'workspace' | 'global',
-  ): Promise<MemoryStoreState & { readonly name?: string }> =>
-    scope === 'global' ? await (globalCache.memory ?? loadGlobalMemory()) : await stateFor(workspace)
-
   const jsonOutput = {
     schema: { type: 'json' } as const,
     render: (_args: unknown, value: JsonValue) => [{ type: 'text' as const, text: JSON.stringify(value, null, 2) }],
@@ -1033,8 +1162,9 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_status',
     description:
-      '报告本会话生效的记忆：工作区后端（存在 .workbuddy/memory 时优先兼容，否则 .dsh/memory）与全局作用域（$DSH_HOME/memory，跨工作区共享）。'
-      + '返回两者的路径、索引大小、日期流水布局、本机计算机名，以及本工作区的继承开关。',
+      '报告本会话生效的记忆：工作区后端（存在 .workbuddy/memory 时优先兼容，否则 .dsh/memory）与全局作用域'
+      + '（$DSH_HOME/memory/MEMORY.md，跨工作区共享的长期画像，单文件、非按天流水）。'
+      + '返回两者的路径、大小、条目数、本工作区的继承开关，以及全局记忆的字节预算。',
     parameters: {},
     output: jsonOutput,
     async execute(): Promise<JsonValue> {
@@ -1065,15 +1195,15 @@ export function apply(ctx: Context, config: Config): void {
         config: configSummary(workspace),
         global: {
           root: toPosix(globalRoot),
-          memoryDir: toPosix(shared.dir),
-          indexPath: toPosix(shared.index),
-          indexExists: shared.hasIndex,
-          indexBytes: shared.bytes,
-          ledgerLayout: shared.layout,
-          ledgers: shared.ledgers.map((f) => f.rel),
+          memoryFile: toPosix(shared.path),
+          exists: shared.exists,
+          bytes: shared.bytes,
+          budgetBytes: globalMemoryBytes,
+          entries: shared.entries.length,
+          sections: shared.sections,
           inherited,
           note: inherited
-            ? '全局记忆会注入本会话（有内容时）；写全局用 memory_write(scope="global")'
+            ? '全局记忆是一份长期用户画像（单文件，非按天流水），会注入本会话；写它用 memory_write(scope="global")，整理用 memory_revise'
             : '本工作区屏蔽了全局记忆（inherit.memory: false）',
         },
       } as unknown as JsonValue
@@ -1083,11 +1213,11 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_read',
     description:
-      '读取记忆。layer=index 返回索引 MEMORY.md —— 硬约束、稳定偏好与文档指针；layer=ledger 返回某一天的流水文件，默认今天。'
-      + 'scope=workspace（默认）读本工作区，scope=global 读跨工作区的全局记忆。',
+      '读取记忆。scope=workspace（默认）：layer=index 返回索引 MEMORY.md，layer=ledger 返回某一天的流水文件（默认今天）。'
+      + 'scope=global：返回跨工作区的全局长期记忆全文（单文件 MEMORY.md，按章节/条目组织，不再按天分册）。',
     parameters: {
-      layer: { type: 'string' as const, enum: ['index', 'ledger'], description: 'index = 索引 MEMORY.md；ledger = 某一天的日期流水' },
-      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享的全局记忆' },
+      layer: { type: 'string' as const, enum: ['index', 'ledger'], description: 'index = 索引/全局记忆文件；ledger = 工作区的某一天日期流水（全局不支持）' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享的全局长期记忆' },
       date: { type: 'string' as const, description: 'layer=ledger 的日期 YYYY-MM-DD，默认今天' },
       limit: { type: 'number' as const, description: '读取流水时返回的最大尾部行数，默认 200' },
     },
@@ -1098,7 +1228,32 @@ export function apply(ctx: Context, config: Config): void {
       const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
       const refused = scope === 'global' ? await globalGate(workspace, false) : await refuseLayer(workspace, 'memory')
       if (refused !== undefined) return refused
-      const state = await storeFor(workspace, scope)
+
+      if (scope === 'global') {
+        if (args.layer === 'ledger') {
+          return {
+            ok: false,
+            scope,
+            layer: 'ledger',
+            error: '全局记忆已改为单文件长期画像（MEMORY.md），不再按天分册；用 layer="index"（或缺省）读取，整理用 memory_revise，新增用 memory_write。',
+          } as unknown as JsonValue
+        }
+        const shared = globalCache.memory ?? await loadGlobalMemory()
+        return {
+          ok: true,
+          scope,
+          layer: 'index',
+          path: toPosix(shared.path),
+          exists: shared.exists,
+          bytes: shared.bytes,
+          budgetBytes: globalMemoryBytes,
+          entries: shared.entries.length,
+          sections: shared.document.sections.map((section) => ({ title: section.title, entries: section.entries.length })),
+          text: shared.text,
+        } as unknown as JsonValue
+      }
+
+      const state = await stateFor(workspace)
       const ledgers = state.ledgers.map((f) => f.rel)
 
       if (args.layer === 'ledger') {
@@ -1172,19 +1327,24 @@ export function apply(ctx: Context, config: Config): void {
 
       const needle = query.toLowerCase()
       const hits: { scope: 'workspace' | 'global', file: string, line: number, text: string }[] = []
-      const search = async (store: MemoryStoreState, scope: 'workspace' | 'global'): Promise<void> => {
-        const ledgerFiles = store.ledgers.map((f) => f.rel)
-        const files = store.hasIndex ? [INDEX_FILE, ...ledgerFiles] : ledgerFiles
+      const search = async (dir: string, files: readonly string[], scope: 'workspace' | 'global'): Promise<void> => {
         for (const file of files) {
-          const content = await readAt(join(store.dir, file))
+          const content = await readAt(join(dir, file))
           if (content === undefined) continue
           normalizeText(content).split('\n').forEach((line, i) => {
             if (line.toLowerCase().includes(needle)) hits.push({ scope, file, line: i + 1, text: line.trim().slice(0, 240) })
           })
         }
       }
-      if (includeWorkspace) await search(await stateFor(workspace), 'workspace')
-      if (includeGlobal) await search(globalCache.memory ?? await loadGlobalMemory(), 'global')
+      if (includeWorkspace) {
+        const workspaceState = await stateFor(workspace)
+        const ledgerFiles = workspaceState.ledgers.map((f) => f.rel)
+        await search(workspaceState.dir, workspaceState.hasIndex ? [INDEX_FILE, ...ledgerFiles] : ledgerFiles, 'workspace')
+      }
+      if (includeGlobal) {
+        const shared = globalCache.memory ?? await loadGlobalMemory()
+        if (shared.exists) await search(shared.dir, [GLOBAL_MEMORY_FILE], 'global')
+      }
       return {
         ok: true,
         query,
@@ -1201,39 +1361,122 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_write',
     description:
-      '经准入审查后，向日期流水追加一条跨会话仍有价值的记忆：决策及其理由、稳定偏好、约定、可复现的坑、环境限制、硬约束。'
-      + '绝不记录密钥、一次性改动或排错流水账；读起来像流水账的条目会被拒绝，除非 force=true。'
-      + 'scope=workspace（默认）写本工作区；scope=global 写跨工作区共享的全局记忆，写入对所有工作区可见，kind 只接受 preference/constraint/convention/decision。',
+      '经准入审查后写入一条跨会话仍有价值的记忆。'
+      + 'scope=workspace（默认）向本工作区的日期流水追加一条：决策及其理由、稳定偏好、约定、可复现的坑、环境限制、硬约束；'
+      + '绝不记录密钥、一次性改动或排错流水账（软提醒需 force=true）。'
+      + 'scope=global 写入跨工作区共享的长期画像（单文件 MEMORY.md 的一个章节），只接受 preference/constraint/convention/decision 四类，'
+      + '适合身份背景、稳定偏好、明确要求、长期约定；项目现状与一次性发现请留在工作区记忆。'
+      + '全局画像有字节预算：接近上限时先用 memory_revise 融合、删减、改写，不要靠追加堆大。'
+      + '在「工作区内修改」模式下写 $DSH_HOME 需要 sandbox_permissions="danger-full-access" 与一句 justification，用户批准后仅本次生效。',
     parameters: {
       content: { type: 'string' as const, required: true, description: '持久的事实、决策、约定或坑本身' },
-      kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '条目分类，默认 fact' },
-      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享' },
-      title: { type: 'string' as const, description: '内容较长时的单行标题（可选）' },
-      tags: { type: 'array' as const, items: { type: 'string' as const }, description: '标签（可选）' },
+      kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '条目分类，默认 fact（全局只接受 preference/constraint/convention/decision）' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区（默认）；global = 跨工作区共享的长期画像' },
+      section: { type: 'string' as const, description: 'scope=global 时的目标章节（如「关于用户」「偏好与习惯」「要求与规则」），默认第一章节' },
+      title: { type: 'string' as const, description: '内容较长时的单行标题（可选，仅工作区）' },
+      tags: { type: 'array' as const, items: { type: 'string' as const }, description: '标签（可选，仅工作区）' },
       force: { type: 'boolean' as const, description: '带软性提醒仍写入；无法绕过硬性拒绝' },
-      date: { type: 'string' as const, description: '覆盖目标日期 YYYY-MM-DD，默认今天' },
+      date: { type: 'string' as const, description: '覆盖目标日期 YYYY-MM-DD，默认今天（仅工作区）' },
+      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: 'scope=global 且当前策略写不到 $DSH_HOME 时使用：请求一次升级，配合 justification 弹出审批' },
+      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
     },
     output: jsonOutput,
-    async execute(args): Promise<JsonValue> {
+    async execute(args, exec): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
       const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
       const refused = scope === 'global' ? await globalGate(workspace, true) : await refuseWrite(workspace)
       if (refused !== undefined) return refused
-      const state = await storeFor(workspace, scope)
       const verdict = evaluateEntry(args.content, args.kind)
 
+      if (scope === 'global') {
+        const check = checkGlobalEntry(args.content, args.kind, evaluateEntry)
+        if (!check.allowed) {
+          return { ok: false, written: false, scope, kind: check.kind, reasons: check.reasons, warnings: check.warnings } as unknown as JsonValue
+        }
+        if (check.warnings.length > 0 && args.force !== true) {
+          return {
+            ok: false,
+            written: false,
+            scope,
+            kind: check.kind,
+            warnings: check.warnings,
+            needsForce: true,
+            hint: '全局画像只放长期有效的结论；若确属此类，用 force=true 重试，否则改写为结论后再写。',
+          } as unknown as JsonValue
+        }
+        const shared = globalCache.memory ?? await loadGlobalMemory()
+        const section = sectionTitle(args.section ?? '')
+        const result = upsertGlobalEntry(shared.text, section, { text: check.text, kind: check.kind })
+        const nextBytes = documentBytes(result.text)
+        if (nextBytes > globalMemoryBytes) {
+          return {
+            ok: false,
+            written: false,
+            scope,
+            section,
+            path: toPosix(shared.path),
+            bytes: shared.bytes,
+            wouldBeBytes: nextBytes,
+            budgetBytes: globalMemoryBytes,
+            error: `写入后会超出全局记忆预算（${String(nextBytes)}/${String(globalMemoryBytes)} 字节）；请先用 memory_revise 融合、删减、改写已有内容，再新增。`,
+          } as unknown as JsonValue
+        }
+        if (!result.changed) {
+          return {
+            ok: true,
+            changed: false,
+            written: false,
+            scope,
+            path: toPosix(shared.path),
+            section,
+            entries: shared.entries.length,
+            note: '相同条目已存在，未重复写入',
+          } as unknown as JsonValue
+        }
+        const policy = await writePolicyFor('memory_write', args, exec)
+        if (!policyWritable(policy, shared.path)) {
+          return {
+            ok: false,
+            written: false,
+            scope,
+            path: toPosix(shared.path),
+            error: '当前权限模式写不到全局记忆文件（$DSH_HOME 在工作区之外）',
+            hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效；或改用 scope="workspace"。',
+          } as unknown as JsonValue
+        }
+        try {
+          const written = await writeAt(shared.path, `${result.text}\n`, currentSession(), policy)
+          refreshGlobal()
+          refresh(workspace)
+          return {
+            ok: true,
+            written: true,
+            scope,
+            path: written,
+            section,
+            createdSection: result.createdSection,
+            entries: result.count,
+            bytes: nextBytes,
+            budgetBytes: globalMemoryBytes,
+            kind: check.kind,
+            visibleTo: '所有工作区（下一个请求即生效）',
+          } as unknown as JsonValue
+        } catch (error) {
+          return {
+            ok: false,
+            written: false,
+            scope,
+            path: toPosix(shared.path),
+            error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+            hint: '全局记忆在 $DSH_HOME 下；可带 sandbox_permissions 与 justification 申请一次升级，或改用 scope="workspace"。',
+          } as unknown as JsonValue
+        }
+      }
+
+      const state = await stateFor(workspace)
       if (!verdict.allowed) {
         return { ok: false, written: false, scope, kind: verdict.kind, reasons: verdict.reasons, warnings: verdict.warnings } as unknown as JsonValue
-      }
-      if (scope === 'global' && !GLOBAL_ENTRY_KINDS.includes(verdict.kind)) {
-        return {
-          ok: false,
-          written: false,
-          scope,
-          kind: verdict.kind,
-          error: `全局记忆只接受 ${GLOBAL_ENTRY_KINDS.join('/')} 四类结论；${verdict.kind} 类事实通常只对一个项目成立，请改用 scope="workspace"`,
-        } as unknown as JsonValue
       }
       if (verdict.warnings.length > 0 && args.force !== true) {
         return {
@@ -1266,27 +1509,21 @@ export function apply(ctx: Context, config: Config): void {
       try {
         written = await writeAt(path, next, currentSession())
       } catch (error) {
-        // A global write lands outside the workspace, which the workspace-write
-        // sandbox policy refuses. Report the policy as the cause instead of a bare
-        // stack: the caller's remedy is to write a workspace entry or widen policy.
         return {
           ok: false,
           written: false,
           scope,
           path: toPosix(path),
           error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
-          hint: scope === 'global'
-            ? '全局记忆在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外的路径；可改用 scope="workspace"，或在允许该路径的策略下运行'
-            : '当前策略不允许写该路径',
+          hint: '当前策略不允许写该路径',
         } as unknown as JsonValue
       }
-      if (scope === 'global') refreshGlobal()
       refresh(workspace)
       return {
         ok: true,
         written: true,
         scope,
-        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : { backend: state.name ?? 'dsh-default' },
+        backend: state.name ?? 'dsh-default',
         path: written,
         date,
         ledgerLayout: state.layout,
@@ -1300,25 +1537,90 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'memory_promote',
     description:
-      '把一行提升进索引 MEMORY.md 的指定章节，使其每轮都注入上下文。此层只留给硬约束、稳定偏好、长期约定与文档指针，'
-      + '不放细节、现状或流水账。scope=global 时提升进全局索引（对所有工作区生效）。已有章节原样保留；重复条目幂等。',
+      '把一条条目提升进每轮注入的长期层。scope=workspace（默认）提升进本工作区索引 MEMORY.md 的指定章节；'
+      + 'scope=global 提升进全局长期画像（单文件 MEMORY.md 的指定章节，只接受 preference/constraint/convention/decision 四类）。'
+      + '这一层只留给硬约束、稳定偏好、长期约定与文档指针，不放细节、现状或流水账；重复条目幂等。'
+      + '在「工作区内修改」模式下写全局需要 sandbox_permissions="danger-full-access" 与一句 justification。',
     parameters: {
-      entry: { type: 'string' as const, required: true, description: '要加入索引的单行条目' },
-      section: { type: 'string' as const, description: '目标章节标题；同名章节保持原位，缺失则新建' },
+      entry: { type: 'string' as const, required: true, description: '要加入长期层的单行条目' },
+      section: { type: 'string' as const, description: '目标章节标题；scope=global 默认第一章节' },
       kind: { type: 'string' as const, enum: [...ENTRY_KINDS], description: '用于准入审查的分类' },
-      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区索引（默认）；global = 跨工作区全局索引' },
+      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace = 本工作区索引（默认）；global = 跨工作区全局画像' },
+      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: 'scope=global 且当前策略写不到 $DSH_HOME 时使用：请求一次升级' },
+      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
     },
     output: jsonOutput,
-    async execute(args): Promise<JsonValue> {
+    async execute(args, exec): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
       const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
       const refused = scope === 'global' ? await globalGate(workspace, true) : await refuseWrite(workspace)
       if (refused !== undefined) return refused
-      const state = await storeFor(workspace, scope)
       const entry = normalizeText(args.entry)
       if (entry.length === 0) return { ok: false, changed: false, error: '提升内容不能为空' } as unknown as JsonValue
 
+      if (scope === 'global') {
+        const check = checkGlobalEntry(entry, args.kind, evaluateEntry)
+        if (!check.allowed) return { ok: false, changed: false, scope, reasons: check.reasons, warnings: check.warnings } as unknown as JsonValue
+        const shared = globalCache.memory ?? await loadGlobalMemory()
+        const section = sectionTitle(args.section ?? '')
+        const result = upsertGlobalEntry(shared.text, section, { text: check.text, kind: check.kind })
+        const nextBytes = documentBytes(result.text)
+        if (nextBytes > globalMemoryBytes) {
+          return {
+            ok: false,
+            changed: false,
+            scope,
+            section,
+            path: toPosix(shared.path),
+            bytes: shared.bytes,
+            wouldBeBytes: nextBytes,
+            budgetBytes: globalMemoryBytes,
+            error: `提升后会超出全局记忆预算（${String(nextBytes)}/${String(globalMemoryBytes)} 字节）；请先用 memory_revise 精简已有内容。`,
+          } as unknown as JsonValue
+        }
+        if (!result.changed) {
+          return { ok: true, changed: false, scope, path: toPosix(shared.path), section, entries: shared.entries.length } as unknown as JsonValue
+        }
+        const policy = await writePolicyFor('memory_promote', args, exec)
+        if (!policyWritable(policy, shared.path)) {
+          return {
+            ok: false,
+            changed: false,
+            scope,
+            path: toPosix(shared.path),
+            error: '当前权限模式写不到全局记忆文件（$DSH_HOME 在工作区之外）',
+            hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效。',
+          } as unknown as JsonValue
+        }
+        try {
+          const written = await writeAt(shared.path, `${result.text}\n`, currentSession(), policy)
+          refreshGlobal()
+          refresh(workspace)
+          return {
+            ok: true,
+            changed: true,
+            scope,
+            path: written,
+            section,
+            createdSection: result.createdSection,
+            entries: result.count,
+            bytes: nextBytes,
+            visibleTo: '所有工作区（下一个请求即生效）',
+          } as unknown as JsonValue
+        } catch (error) {
+          return {
+            ok: false,
+            changed: false,
+            scope,
+            path: toPosix(shared.path),
+            error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+            hint: '可带 sandbox_permissions 与 justification 申请一次升级。',
+          } as unknown as JsonValue
+        }
+      }
+
+      const state = await stateFor(workspace)
       const verdict = evaluateEntry(entry, args.kind)
       if (!verdict.allowed) return { ok: false, changed: false, scope, reasons: verdict.reasons } as unknown as JsonValue
 
@@ -1329,17 +1631,115 @@ export function apply(ctx: Context, config: Config): void {
         return { ok: true, changed: false, scope, path: toPosix(state.index), section } as unknown as JsonValue
       }
       const written = await writeAt(state.index, result.text, currentSession())
-      if (scope === 'global') refreshGlobal()
       refresh(workspace)
       return {
         ok: true,
         changed: true,
         scope,
-        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : { backend: state.name ?? 'dsh-default' },
+        backend: state.name ?? 'dsh-default',
         path: written,
         section,
         createdSection: result.createdSection,
       } as unknown as JsonValue
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'memory_revise',
+    description:
+      '重写全局长期画像（scope 仅 global）。先 memory_read(scope="global") 读取现文，把新事实融合进已有条目、删除过时或重复内容、改写措辞，'
+      + '然后提交完整的新文本 —— 这是防止记忆膨胀的常规做法：不必每次追加，也可以合并、精简、重写。'
+      + '提交内容会被重新规范化、逐条准入审查（全局只接受 preference/constraint/convention/decision）并检查字节预算；'
+      + '工作区记忆是日期流水，不支持整篇重写（用 memory_write 追加，或用 memory_promote 提升）。'
+      + '在「工作区内修改」模式下写全局需要 sandbox_permissions="danger-full-access" 与一句 justification。',
+    parameters: {
+      content: { type: 'string' as const, required: true, description: '完整的全局画像文档：`# 全局记忆` + `## 章节` + `- [kind] 条目`' },
+      force: { type: 'boolean' as const, description: '带软性提醒仍写入；无法绕过硬性拒绝' },
+      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: '当前策略写不到 $DSH_HOME 时使用：请求一次升级' },
+      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
+    },
+    output: jsonOutput,
+    async execute(args, exec): Promise<JsonValue> {
+      const workspace = currentWorkspace()
+      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
+      const refused = await globalGate(workspace, true)
+      if (refused !== undefined) return refused
+      const submitted = normalizeText(args.content)
+      if (submitted.length === 0) return { ok: false, written: false, error: '提交内容不能为空' } as unknown as JsonValue
+
+      const document = parseGlobalMemory(submitted)
+      const entries = flattenEntries(document)
+      if (entries.length === 0) {
+        return {
+          ok: false,
+          written: false,
+          error: '提交内容里没有任何条目；期望 `## 章节` 下的 `- [preference] …` 形式行。',
+        } as unknown as JsonValue
+      }
+      const reasons: string[] = []
+      const warnings: string[] = []
+      for (const entry of entries) {
+        const check = checkGlobalEntry(entry.text, entry.kind, evaluateEntry)
+        reasons.push(...check.reasons.map((reason) => `「${entry.section}」${reason}`))
+        warnings.push(...check.warnings)
+      }
+      if (reasons.length > 0) return { ok: false, written: false, scope: 'global', reasons } as unknown as JsonValue
+      if (warnings.length > 0 && args.force !== true) {
+        return { ok: false, written: false, scope: 'global', warnings, needsForce: true, hint: '若确属长期有效的画像内容，用 force=true 重试。' } as unknown as JsonValue
+      }
+      const canonical = reviseGlobalMemory(submitted, GLOBAL_MEMORY_TITLE)
+      const bytes = documentBytes(canonical)
+      if (bytes > globalMemoryBytes) {
+        return {
+          ok: false,
+          written: false,
+          scope: 'global',
+          bytes,
+          budgetBytes: globalMemoryBytes,
+          error: `提交内容超出全局记忆预算（${String(bytes)}/${String(globalMemoryBytes)} 字节）；请先精简条目再提交。`,
+        } as unknown as JsonValue
+      }
+      const shared = globalCache.memory ?? await loadGlobalMemory()
+      if (normalizeText(canonical) === normalizeText(shared.text)) {
+        return { ok: true, changed: false, written: false, scope: 'global', path: toPosix(shared.path), bytes, entries: entries.length } as unknown as JsonValue
+      }
+      const policy = await writePolicyFor('memory_revise', args, exec)
+      if (!policyWritable(policy, shared.path)) {
+        return {
+          ok: false,
+          written: false,
+          scope: 'global',
+          path: toPosix(shared.path),
+          error: '当前权限模式写不到全局记忆文件（$DSH_HOME 在工作区之外）',
+          hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效。',
+        } as unknown as JsonValue
+      }
+      try {
+        const written = await writeAt(shared.path, `${canonical}\n`, currentSession(), policy)
+        refreshGlobal()
+        refresh(workspace)
+        return {
+          ok: true,
+          changed: true,
+          written: true,
+          scope: 'global',
+          path: written,
+          bytes,
+          budgetBytes: globalMemoryBytes,
+          entries: entries.length,
+          sections: document.sections.filter((section) => section.entries.length > 0).length,
+          visibleTo: '所有工作区（下一个请求即生效）',
+        } as unknown as JsonValue
+      } catch (error) {
+        return {
+          ok: false,
+          written: false,
+          scope: 'global',
+          path: toPosix(shared.path),
+          error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
+          hint: '可带 sandbox_permissions 与 justification 申请一次升级。',
+        } as unknown as JsonValue
+      }
     },
   }))
 
@@ -1363,11 +1763,15 @@ export function apply(ctx: Context, config: Config): void {
         memoryDir: toPosix(state.dir),
         global: {
           root: toPosix(globalRoot),
-          memoryDir: toPosix(globalCache.memory?.dir ?? globalLayerDir(globalRoot, 'memory')),
+          memoryFile: toPosix(globalCache.memory?.path ?? join(globalLayerDir(globalRoot, 'memory'), GLOBAL_MEMORY_FILE)),
+          budgetBytes: globalMemoryBytes,
           inherited: (await configFor(workspace)).layers.inherit.memory,
           writeKinds: GLOBAL_ENTRY_KINDS,
-          note: '全局记忆跨工作区共享；写它用 memory_write(scope="global")，只有 preference/constraint/convention/decision 四类可写，'
-            + '某个项目的一次性发现应留在工作区记忆。',
+          note: '全局记忆是跨工作区共享的长期用户画像：单文件 MEMORY.md，按章节组织，不按天分册；每轮注入，'
+            + '只记身份背景、稳定偏好、明确要求、长期约定（preference/constraint/convention/decision 四类）。'
+            + '新增单条用 memory_write(scope="global", section=…)，融合/删减/改写用 memory_revise（防膨胀），工作区条目提升用 memory_promote。'
+            + '预算默认与 globalMemoryBytes 一致，超出时先 memory_revise 精简。'
+            + '在「工作区内修改」模式下需要 sandbox_permissions="danger-full-access" + justification 才能写 $DSH_HOME。',
         },
         host: state.host,
         ledgerLayout: state.layout,
@@ -1593,10 +1997,12 @@ export function apply(ctx: Context, config: Config): void {
               ledgers: localMemory.ledgers.length,
             },
             global: {
-              dir: toPosix(sharedMemory.dir),
-              indexBytes: sharedMemory.bytes,
-              ledgers: sharedMemory.ledgers.length,
-              configured: sharedMemory.hasIndex || sharedMemory.ledgers.length > 0,
+              file: toPosix(sharedMemory.path),
+              bytes: sharedMemory.bytes,
+              budgetBytes: globalMemoryBytes,
+              entries: sharedMemory.entries.length,
+              sections: sharedMemory.sections,
+              configured: sharedMemory.exists && sharedMemory.entries.length > 0,
             },
           },
           skills: { enabled: config.layers.skills, note: '技能只有工作区来源（.workbuddy/skills）；全局技能由 DSH 原生的 $DSH_HOME/skills 提供，本插件不接管。' },
@@ -1658,15 +2064,18 @@ export function apply(ctx: Context, config: Config): void {
     name: 'persona_write',
     description:
       '写入人格片段（<scope>/.dsh 或 $DSH_HOME 下的 persona/<name>.md）。人格写身份、语气、价值观与禁忌；'
-      + '项目事实属于记忆，不要写进人格。scope=global 的写入对所有工作区生效。',
+      + '项目事实属于记忆，不要写进人格。scope=global 的写入对所有工作区生效；'
+      + '在「工作区内修改」模式下写全局需要 sandbox_permissions="danger-full-access" 与一句 justification。',
     parameters: {
       name: { type: 'string' as const, required: true, description: '片段名（不含 .md，如 02-voice）' },
       content: { type: 'string' as const, required: true, description: '片段正文；可自带 frontmatter（title/order）' },
       scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace（默认）或 global' },
       mode: { type: 'string' as const, enum: ['replace', 'append'], description: 'replace（默认）整体替换；append 追加为新的段落' },
+      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: 'scope=global 且当前策略写不到 $DSH_HOME 时使用：请求一次升级' },
+      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
     },
     output: jsonOutput,
-    async execute(args): Promise<JsonValue> {
+    async execute(args, exec): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
       const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
@@ -1709,16 +2118,28 @@ export function apply(ctx: Context, config: Config): void {
       const next = existing === undefined || normalizeText(existing).length === 0
         ? `${body}\n`
         : `${normalizeText(existing).replace(/\s+$/, '')}\n\n${body}\n`
+      const policy = scope === 'global' ? await writePolicyFor('persona_write', args, exec) : undefined
+      if (scope === 'global' && !policyWritable(policy, path)) {
+        return {
+          ok: false,
+          written: false,
+          scope,
+          error: '当前权限模式写不到全局人格文件（$DSH_HOME 在工作区之外）',
+          hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效。',
+        } as unknown as JsonValue
+      }
       let written: string
       try {
-        written = await writeAt(path, next, currentSession())
+        written = await writeAt(path, next, currentSession(), policy)
       } catch (error) {
         return {
           ok: false,
           written: false,
           scope,
           error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
-          hint: scope === 'global' ? '全局人格在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外' : '当前策略不允许写该路径',
+          hint: scope === 'global'
+            ? '全局人格在 $DSH_HOME 下；可带 sandbox_permissions 与 justification 申请一次升级，或改用 scope="workspace"。'
+            : '当前策略不允许写该路径',
         } as unknown as JsonValue
       }
       if (scope === 'global') await loadGlobalPersona()
@@ -1781,9 +2202,11 @@ export function apply(ctx: Context, config: Config): void {
       valence: { type: 'number' as const, description: '-1 消极 … +1 积极（可选）' },
       arousal: { type: 'number' as const, description: '0 平静 … 1 亢奋（可选）' },
       note: { type: 'string' as const, description: '一两句备注（可选，最多 1024 字节）' },
+      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: 'scope=global 且当前策略写不到 $DSH_HOME 时使用：请求一次升级' },
+      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
     },
     output: jsonOutput,
-    async execute(args): Promise<JsonValue> {
+    async execute(args, exec): Promise<JsonValue> {
       const workspace = currentWorkspace()
       if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
       const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
@@ -1813,9 +2236,18 @@ export function apply(ctx: Context, config: Config): void {
       }
       const dir = scope === 'global' ? globalLayerDir(globalRoot, 'mood') : workspaceLayerDir(workspace, 'mood')
       const path = join(dir, MOOD_FILE_NAME)
+      const policy = scope === 'global' ? await writePolicyFor('mood_set', args, exec) : undefined
+      if (scope === 'global' && !policyWritable(policy, path)) {
+        return {
+          ok: false,
+          scope,
+          error: '当前权限模式写不到全局情绪文件（$DSH_HOME 在工作区之外）',
+          hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效。',
+        } as unknown as JsonValue
+      }
       let written: string
       try {
-        written = await writeAt(path, document, currentSession())
+        written = await writeAt(path, document, currentSession(), policy)
       } catch (error) {
         return {
           ok: false,
@@ -2002,9 +2434,9 @@ export function apply(ctx: Context, config: Config): void {
           refresh(workspace)
           return ''
         }
-        // An untouched global store must stay invisible: a section that only ever
-        // says "nothing here yet" is pure per-turn token cost.
-        if (!state.hasIndex && state.ledgers.length === 0) return ''
+        // An untouched global profile must stay invisible: a section that only
+        // ever says "nothing here yet" is pure per-turn token cost.
+        if (!state.exists || state.entries.length === 0) return ''
         return renderGlobalMemory(state)
       } catch { return '' }
     },
@@ -2064,7 +2496,7 @@ export function apply(ctx: Context, config: Config): void {
    * tool body never runs, which is the intended fail-closed behaviour.
    */
   ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
-    if (exec.name !== 'memory_write' && exec.name !== 'memory_promote' && exec.name !== 'persona_write') return next()
+    if (exec.name !== 'memory_write' && exec.name !== 'memory_promote' && exec.name !== 'memory_revise' && exec.name !== 'persona_write') return next()
     // A workspace whose layer is off — or whose global scope is blocked —
     // refuses the call in its own body with a message naming the switch, so the
     // gate stays silent instead of asking the user to approve a doomed write.
@@ -2075,6 +2507,7 @@ export function apply(ctx: Context, config: Config): void {
       {
         globalMemory: approveGlobalMemory,
         persona: approvePersonaWrite,
+        escalation: hasEscalationArgs(exec.arguments),
         memoryWritable: layers.memory === 'enabled',
         inheritMemory: layers.inherit.memory,
         personaEnabled: layers.persona,

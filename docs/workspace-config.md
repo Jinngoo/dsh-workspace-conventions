@@ -61,9 +61,11 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `approveGlobalMemory` | `true` | `memory_write` / `memory_promote` 的 `scope="global"` 先请求一次性审批；`false` 关闭该门 |
+| `approveGlobalMemory` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 先请求一次性审批；带 `sandbox_permissions` 的调用由 escalation 审批合并；`false` 关闭该门 |
 | `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）先请求一次性审批；`false` 关闭该门 |
 | `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
+| `globalMemoryBytes` | `4096` | 全局长期画像 `MEMORY.md` 的存储硬预算（0.7.0 新增）；超出的写入被拒绝并提示先精简 |
+| `globalIndexPromptBytes` | `4096` | 全局画像每轮注入的字节上限；超出截断并提示 `memory_read` |
 
 把这些键写进 `.dsh/workspace.yml` 会命中下面的「未知键」错误：**报错并停用所有层**。这是刻意的——行配置是部署策略，不该被单个项目悄悄覆盖；反过来，项目级开关（`layers.*`、`inherit.*`）只由这份文件解释，不出现在 profile 里。
 

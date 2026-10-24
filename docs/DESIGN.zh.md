@@ -57,7 +57,8 @@ kind: "package-reference"
     moodPromptBytes: 512
     moodHalfLifeHours: 6
     moodMaxAgeHours: 48
-    globalIndexPromptBytes: 3072
+    globalIndexPromptBytes: 4096
+    globalMemoryBytes: 4096
     globalRulesPromptBytes: 12288
     globalRoot: ''          # 空 = 跟随 $DSH_HOME，再退 ~/.dsh
     # 0.6.0：写入审批与情绪维护（行配置，不能写进 .dsh/workspace.yml）
@@ -76,14 +77,17 @@ kind: "package-reference"
 | `moodPromptBytes` | `512` | 情绪段落预算——故意很小，情绪只是一行状态。 |
 | `moodHalfLifeHours` | `6` | 情绪衰减半衰期；一个半衰期后权重减半。 |
 | `moodMaxAgeHours` | `48` | 超过该年龄的情绪视为「已平复」，不再注入具体状态。 |
-| `globalIndexPromptBytes` | `3072` | 全局记忆索引段落预算，与工作区索引分开，互不挤占。 |
+| `globalIndexPromptBytes` | `4096` | 全局画像注入上限，与工作区索引分开，互不挤占；超出截断并留 `memory_read` 指针。 |
+| `globalMemoryBytes` | `4096` | **0.7.0 新增**：全局长期画像 `MEMORY.md` 的存储硬预算；新增/重写超预算会被拒绝并提示先精简。 |
 | `globalRulesPromptBytes` | `12288` | 全局规则段落预算，与工作区规则分开。 |
 | `globalRoot` | `''` | 全局作用域根；空则跟随 `$DSH_HOME`，再退 `~/.dsh`。 |
-| `approveGlobalMemory` | `true` | `scope="global"` 的 `memory_write` / `memory_promote` 在工具体执行前请求一次性审批；`false` 关闭该门。**行配置**，不能写进 `.dsh/workspace.yml`。 |
+| `approveGlobalMemory` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 在工具体执行前请求一次性审批（带 `sandbox_permissions` 的调用由 escalation 审批合并）；`false` 关闭该门。**行配置**，不能写进 `.dsh/workspace.yml`。 |
 | `approvePersonaWrite` | `true` | `persona_write`（工作区与全局两个作用域）请求一次性审批；`false` 关闭该门。行配置。 |
 | `moodProactive` | `true` | 是否注入 `workspace-mood-maintenance`（「情绪维护」）段落；还要求工作区 `mood` 层开着。行配置。 |
 
 最后三行是 **0.6.0 新增**的布尔开关，默认全 `true`。它们和字节预算同一条边界：属于 profile 组合里的**行配置**，一旦写进项目级 `.dsh/workspace.yml` 就会命中未知键错误（报错并停用所有层）。项目级能决定的仍是各层是否启用（`layers.*`）与是否继承全局（`inherit.*`）。
+
+**0.7.0** 追加 `globalMemoryBytes`，并把 `globalIndexPromptBytes` 默认提到 4096：全局记忆从「索引 + 日期流水」改为单文件长期画像后，存储预算与注入上限都按同一份画像计。
 
 
 ### 它贡献的工具
@@ -91,11 +95,12 @@ kind: "package-reference"
 | 工具 | 用途 |
 |---|---|
 | `self_status` | 两个作用域 × 全部层的全景：目录、条目数、字节、预算、继承开关、情绪衰减结果、阻塞原因。 |
-| `memory_status` | 报告工作区后端与全局记忆的路径、索引大小、流水布局与继承开关。 |
-| `memory_read` | 读取索引（`layer=index`）或某一天的流水（`layer=ledger`）；`scope` 选工作区或全局。 |
-| `memory_search` | 在索引与所有流水中做大小写不敏感的字面子串检索；默认 `scope=both`。 |
-| `memory_write` | 经准入审查后，向当日流水追加一条持久条目；全局只接受四类结论，且先要一次性审批（`approveGlobalMemory`）。 |
-| `memory_promote` | 在指定章节下向索引加入一行，使其每轮都被注入；`scope="global"` 时先要一次性审批。 |
+| `memory_status` | 报告工作区后端与全局画像的路径、大小、条目数、预算与继承开关。 |
+| `memory_read` | 读取工作区索引/某一天流水，或 `scope="global"` 的整篇画像。 |
+| `memory_search` | 在索引、全部流水与全局画像中做大小写不敏感的字面子串检索；默认 `scope=both`。 |
+| `memory_write` | 经准入审查后，向工作区当日流水追加一条持久条目；`scope="global"` 时写入全局画像的指定章节（四类结论，先要一次性审批或一次 escalation 授权）。 |
+| `memory_promote` | 在指定章节下向长期层加入一行，使其每轮都被注入；`scope="global"` 时写全局画像。 |
+| `memory_revise` | **0.7.0 新增**：整篇重写全局画像（融合、删减、改写），逐条准入 + 预算校验；这是防膨胀的常规做法。 |
 | `memory_help` | 说明当前生效的写入准则与准入策略（含全局 vs 工作区的判定）。 |
 | `rule_status` | 报告工作区与全局两套规则册的清单、分类、触发 glob 与已触发状态。 |
 | `rule_read` | 读取一册规则的完整正文（绕过 16 KB 注入上限）；`scope` 选作用域。 |
@@ -199,6 +204,8 @@ kind: "package-reference"
 **章节层级判定。** `MEMORY.md` 的写法并不统一。WorkBuddy 的原生布局是孤立的一级文档标题加二级章节（`## 一、…`），而没有标题的文档会直接从最浅的标题开始。`detectSectionLevel` 把「只出现一次且比其余标题都浅」的那一层视为文档标题，因此 `memory_promote` 会插进预期的章节，而不会多出一个幽灵章节。
 
 ### 日期流水的布局
+
+**0.7.0 起，全局记忆不再使用日期流水**：`$DSH_HOME/memory/MEMORY.md` 是单文件长期画像（章节 + 条目，整篇注入、可用 `memory_revise` 整篇重写）。下面的布局探测只适用于**工作区**记忆。
 
 WorkBuddy 的日期流水有两种真实布局：平铺在记忆目录下（`memory/YYYY-MM-DD.md`），或按计算机名分目录（`memory/<计算机名>/YYYY-MM-DD.md`）。没有配置项声明用的是哪一种，因此 `scanLedgers` 只依据目录自身的形状判断——子目录里出现日期文件即视为「按机器分目录」，与本机同名的子目录（精确同名优先，其次忽略大小写）即使还没写日期文件也算。写入位置由 `ledgerWritePath` 给出：分目录时新流水进本机目录，平铺时进记忆目录根。读取某一天由 `ledgerForDate` 定优先级——本机、记忆目录根，最后才是其他机器唯一命中的那一份，因此同一天在两台机器上都有记录时不会猜错机器。检索不受布局影响：索引与全部机器的流水都会被搜到。
 

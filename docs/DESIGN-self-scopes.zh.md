@@ -107,17 +107,18 @@ updated: 2026-10-23T00:12:00+08:00
 
 ### 4.3 memory（记忆）— 每轮注入，order 58（全局）/ 60（工作区）
 
-- 结构、准入、索引+流水模型**完全复用现有实现**，只是把「后端解析」从单作用域扩展到 `(scope, backend)` 列表——这正是 `docs/DESIGN.zh.md:236` 预留的接缝。
-- **注入**：两段独立章节，各用各的预算（`globalIndexPromptBytes` / `indexPromptBytes`）：
+- 工作区记忆沿用「索引 + 日期流水」；**全局记忆在 0.7.0 改为单文件长期画像**（`$DSH_HOME/memory/MEMORY.md`，`## 章节` + `- [kind] 条目`），因为两者的生命周期不同：工作区流水回答"这个项目发生过什么"，全局画像回答"这个用户是谁、该怎么对待他"。
+- **注入**：两段独立章节，各用各的预算（`globalIndexPromptBytes` / `indexPromptBytes`）；全局画像整篇注入，超出注入上限截断并留 `memory_read(scope=global)` 指针：
   ```
   ## 全局记忆
-  <全局 MEMORY.md 的章节，超出预算截断并留 memory_read(scope=global) 指针>
+  <MEMORY.md 全文（章节 + 条目），超出预算截断>
   ## 工作区记忆
-  <现有内容>
+  <索引 + 流水形态>
   ```
-- **工具**：`memory_read` / `memory_search` / `memory_write` / `memory_promote` 增加 `scope: workspace | global | both`（默认 `workspace`；`search` 默认 `both`，因为跨作用区检索正是它存在的理由）。
-- **写准入**：全局写入走同一套 `evaluateEntry`（密钥/PII 硬拒、流水账软拒）。**全局记忆该比工作区更严格**：写全局流水时要求 `kind` 属于 `preference|constraint|convention|decision`（事实/环境类默认留在工作区），防止"这个项目的一次性发现"污染全局——这条是新增的定向护栏。
-- **布局探测**：全局记忆同样支持平铺与按计算机名分目录（`memory/<host>/`），复用 `scanLedgers` / `ledgerWritePath`。
+- **工具**：`memory_read` / `memory_search` / `memory_write` / `memory_promote` 增加 `scope: workspace | global | both`（默认 `workspace`；`search` 默认 `both`）；新增 `memory_revise`（仅 global，整篇重写）。全局作用域不再按天分册。
+- **写准入**：全局写入走同一套 `evaluateEntry`（密钥/PII 硬拒、流水账软拒）。全局比工作区更严格：`kind` 只接受 `preference|constraint|convention|decision`（事实/环境类默认留在工作区），防止"这个项目的一次性发现"污染全局。
+- **防膨胀**：`globalMemoryBytes`（默认 4 KB）是存储硬预算，超出的新增/重写被拒绝并提示先精简；`memory_revise` 的语义就是"读→融合/删减/改写→提交全文"，让全局画像可以被整理而不是只能变长。
+- **审批与授权分离**：全局写入先要一次性同意（`approveGlobalMemory`）；若当前文件策略写不到 `$DSH_HOME`，调用带 `sandbox_permissions` + `justification` 走 DSH 的 `approveEscalation` 按次升级——批准后仅该次调用放宽，带升级参数时同意闸门不再重复询问。
 
 ### 4.4 rules（规则）— 每轮注入，order 55（沿用）
 
@@ -194,7 +195,7 @@ workspace-conventions:
 | 53 | `workspace-mood-maintenance`（情绪维护，0.6.0） | 无独立预算：固定三行 |
 | 54 | `global-rules`（全局规则册） | `globalRulesPromptBytes`（默认 12288） |
 | 55 | `workspace-rules`（既有） | `rulesPromptBytes` |
-| 58 | `global-memory`（全局记忆索引） | `globalIndexPromptBytes`（默认 3072） |
+| 58 | `global-memory`（全局长期画像，0.7.0 起单文件） | `globalIndexPromptBytes`（默认 4096） |
 | 60 | `workspace-memory`（既有） | `indexPromptBytes`（既有 7000） |
 
 - 全部沿用 `systemPrompt.context()`（**同步 provider**）：每作用域每层的文本异步探测进缓存，渲染时同步读缓存；`agent/created` 预热两套作用域。
@@ -203,7 +204,7 @@ workspace-conventions:
 
 ## 8. 全局写入的三个现实约束
 
-1. **沙箱策略**：全局文件在工作区之外，`workspace-write` 模式下写入必须被拒绝。实现上所有写入都过 `sandboxPolicy.resolve({ session })`：被拒时工具返回可执行的原因（"当前策略不允许写 `$DSH_HOME`，可改用 `scope: workspace` 或把该目录加入允许列表"），而不是静默失败或越过策略。
+1. **沙箱策略**：全局文件在工作区之外，`workspace-write` 模式下写入会被拒绝。实现上写入前先预检目标路径是否在当前策略的可写根内：不可写时直接返回可执行的原因与升级指引，而不是"先问审批、再失败"。要让允许真正生效，调用带 `sandbox_permissions: "danger-full-access"` + `justification` 走 DSH 的 `approveEscalation`（按次升级，仅该次调用放宽）；带升级参数时 `approveGlobalMemory` / `approvePersonaWrite` 的同意闸门不再重复询问。
 2. **并发**：多个工作区的会话共享同一份全局文件。写入用「临时文件 + rename」原子替换；追加用 `appendFile`；索引的读—改—写加一个 `memory/.lock`（`open('wx')` + 过期判定），拿不到锁时返回"稍后重试"而不是丢写入。
 3. **可见性**：全局写入成功后，下一个请求就会出现在所有工作区的注入里——这是特性，也是风险。所以 `memory_write scope=global` 的返回体会明确写"此条将对所有工作区可见"，并且准入门槛更高（见 4.3）。
 
@@ -215,8 +216,8 @@ workspace-conventions:
 | 已有 `.dsh/workspace.yml` | 缺 `persona`/`mood`/`inherit` 键时取默认（启用 + 继承），无需改文件 |
 | 新的起手模板 | 生成时带上带注释的新键（全注释 = 三层全开 + 两作用域继承） |
 | 回退到 v0.4.x | 旧版本遇到新键会 fail-closed（既有防御）→ 需要把新键删掉才能回退；README 会写明 |
-| 数据迁移 | **不做**。已有工作区记忆留在原位；全局记忆从空开始，由模型/人按需写入 |
-| 记忆后端优先级 | 全局侧只有一种形态（Markdown）；工作区侧维持 workbuddy > dsh-default |
+| 数据迁移 | **不做**自动迁移。已有工作区记忆留在原位；全局记忆从 0.7.0 起是单文件画像，旧 `memory/YYYY-MM-DD.md` 需手工并入 `MEMORY.md` 后移入 `archive/`（读工具会说明旧流水不再注入） |
+| 记忆后端优先级 | 全局侧只有一种形态（单文件 Markdown 画像）；工作区侧维持 workbuddy > dsh-default |
 
 ## 10. 配置项汇总（新增 6 个，均有默认值）
 
@@ -227,7 +228,8 @@ workspace-conventions:
 | `moodPromptBytes` | `512` | 情绪段落预算（很紧，故意） |
 | `moodHalfLifeHours` | `6` | 情绪半衰期 |
 | `moodMaxAgeHours` | `48` | 超过即视为平复，不再注入具体情绪 |
-| `globalIndexPromptBytes` | `3072` | 全局记忆索引预算 |
+| `globalIndexPromptBytes` | `4096` | 全局画像注入上限 |
+| `globalMemoryBytes` | `4096` | 全局画像存储硬预算（0.7.0 新增） |
 | `globalRulesPromptBytes` | `12288` | 全局规则预算 |
 
 既有 `indexPromptBytes` / `rulesPromptBytes` / `ruleFileBytes` 含义不变（只作用于工作区）。
@@ -246,7 +248,7 @@ workspace-conventions:
 ## 12. 明确不做
 
 - 不做向量检索/embedding（记忆是 Markdown + 字面检索，DSH 的哲学是"证据留在原地"）。
-- 不做自动遗忘/摘要（流水永不删；索引靠准入与预算控制）。
+- 不做自动遗忘/摘要（工作区流水永不删；全局画像靠 `memory_revise` 人工/模型显式融合删减 + 准入/预算控制，不做自动摘要）。
 - 不做"会话内可演化人格"——preset 首轮后锁定是 DSH 的既定语义，人格变更是显式写入。
 - 不做 GUI 配置页（写不了项目文件，与既有结论一致）。
 - 不接管 `$DSH_HOME/skills`、不接管 `AGENTS.md`（两者是 DSH 原生通道，避免双重注入）。

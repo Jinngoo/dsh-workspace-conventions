@@ -160,13 +160,14 @@ describe('row wiring', () => {
     expect([...orders].sort((left, right) => left - right)).toEqual(orders)
   })
 
-  it('registers the thirteen tools it documents', () => {
+  it('registers the fourteen tools it documents', () => {
     expect(harness().tools.map((tool) => tool.name)).toEqual([
       'memory_status',
       'memory_read',
       'memory_search',
       'memory_write',
       'memory_promote',
+      'memory_revise',
       'memory_help',
       'rule_status',
       'rule_read',
@@ -609,13 +610,14 @@ describe('the global scope and the self layers', () => {
       globalRoot: string
       layers: {
         persona: { global: { fragments: readonly { name: string }[] } }
-        memory: { global: { indexBytes: number } }
+        memory: { global: { bytes: number, entries: number } }
       }
     }
     expect(status.ok).toBe(true)
     expect(status.globalRoot).toContain('home')
     expect(status.layers.persona.global.fragments.map((f) => f.name)).toContain('01-identity')
-    expect(status.layers.memory.global.indexBytes).toBeGreaterThan(0)
+    expect(status.layers.memory.global.bytes).toBeGreaterThan(0)
+    expect(status.layers.memory.global.entries).toBeGreaterThan(0)
   })
 
   it('injects a global rule book and reads it through rule_read(scope: global)', async () => {

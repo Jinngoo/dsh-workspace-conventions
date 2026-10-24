@@ -25,7 +25,7 @@
 const DIGEST_CHARS = 60
 
 /** Tools that write the single cross-workspace memory store. */
-const GLOBAL_MEMORY_TOOLS: ReadonlySet<string> = new Set(['memory_write', 'memory_promote'])
+const GLOBAL_MEMORY_TOOLS: ReadonlySet<string> = new Set(['memory_write', 'memory_promote', 'memory_revise'])
 
 /** The tool that writes persona fragments in either scope. */
 const PERSONA_TOOL = 'persona_write'
@@ -51,6 +51,16 @@ export interface ApprovalPolicy {
   readonly globalMemory: boolean
   /** Ask before writing a persona fragment, in either scope. */
   readonly persona: boolean
+  /**
+   * Whether this call already carries an explicit sandbox-escalation request.
+   *
+   * An escalation approval (DSH's sandbox seam) asks the user once for "run this
+   * single call with wider permissions", which is strictly stronger consent than
+   * "may I write this entry". Asking the memory gate on top of it would show two
+   * windows for one action, so the escalation owns the consent for that call. The
+   * memory gate stays silent and the tool body resolves the grant itself.
+   */
+  readonly escalation: boolean
   /** Whether the workspace memory layer currently accepts writes. */
   readonly memoryWritable: boolean
   /** Whether this workspace may read/write the global memory scope. */
@@ -80,6 +90,9 @@ export function approvalRequestFor(call: GatedToolCall, policy: ApprovalPolicy):
   // Unrelated tools are never inspected beyond this point; the listener must be
   // total and cheap for the overwhelming majority of calls.
   if (!GLOBAL_MEMORY_TOOLS.has(call.name) && call.name !== PERSONA_TOOL) return undefined
+  // An explicit escalation ask owns this call's consent; a second window for the
+  // same write would be noise the user has to dismiss twice.
+  if (policy.escalation) return undefined
 
   const args = asRecord(call.arguments)
   if (args === undefined) return undefined
@@ -96,6 +109,20 @@ export function approvalRequestFor(call: GatedToolCall, policy: ApprovalPolicy):
  * workspace write.
  */
 function globalMemoryRequest(name: string, args: Record<string, unknown>, policy: ApprovalPolicy): ApprovalRequest | undefined {
+  if (name === 'memory_revise') {
+    // The revise tool has no `scope` argument: it only ever rewrites the global profile.
+    if (!policy.globalMemory || !policy.memoryWritable || !policy.inheritMemory) return undefined
+    const content = stringArg(args, 'content')
+    if (content === undefined) return undefined
+    const digest = digestOf(content)
+    return {
+      reason: `重写全局记忆（所有工作区共享）：${digest}`,
+      displayReason: {
+        en: `Rewrite the global memory profile shared by every workspace: "${digest}"`,
+        zh: `重写全局记忆（所有工作区共享）：${digest}`,
+      },
+    }
+  }
   if (args['scope'] !== 'global') return undefined
   if (!policy.globalMemory || !policy.memoryWritable || !policy.inheritMemory) return undefined
 
@@ -110,6 +137,19 @@ function globalMemoryRequest(name: string, args: Record<string, unknown>, policy
       displayReason: {
         en: `Write to the global memory shared by every workspace (${kind ?? 'default kind'}): "${digest}"`,
         zh: `写入全局记忆（所有工作区共享，${label}）：${digest}`,
+      },
+    }
+  }
+
+  if (name === 'memory_revise') {
+    const content = stringArg(args, 'content')
+    if (content === undefined) return undefined
+    const digest = digestOf(content)
+    return {
+      reason: `重写全局记忆（所有工作区共享）：${digest}`,
+      displayReason: {
+        en: `Rewrite the global memory profile shared by every workspace: "${digest}"`,
+        zh: `重写全局记忆（所有工作区共享）：${digest}`,
       },
     }
   }

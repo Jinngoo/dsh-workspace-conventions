@@ -1,6 +1,6 @@
 {
   "name": "@jinngoo/dsh-workspace-conventions",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "DSH Bundle：双层作用域（工作区 + 全局 $DSH_HOME）的人格 persona、情绪 mood、记忆 memory、规则 rules 与技能 skills；兼容 WorkBuddy（.workbuddy/memory、.workbuddy/rules、.workbuddy/skills）",
   "license": "MIT",
   "repository": {
