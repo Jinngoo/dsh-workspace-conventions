@@ -1,7 +1,8 @@
 {
   "name": "@jinngoo/dsh-workspace-conventions",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "DSH Bundle：双层作用域（工作区 + 全局 $DSH_HOME）的人格 persona、情绪 mood、记忆 memory、规则 rules 与技能 skills；兼容 WorkBuddy（.workbuddy/memory、.workbuddy/rules、.workbuddy/skills）",
+  "author": "Jinngoo <jinngoo@qq.com> (https://github.com/Jinngoo)",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -18,6 +19,18 @@
   "publishConfig": {
     "access": "public"
   },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "bundle",
+    "persona",
+    "memory",
+    "rules",
+    "skills",
+    "workbuddy"
+  ],
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",

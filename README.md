@@ -381,24 +381,29 @@ pnpm verify:workbuddy "D:\Work\GameCatStudio\Escort\program" --profile
 
 ## 安装（作为 Bundle 装进某个 profile）
 
-本地开发用绝对路径安装：
+已发布到 npm，一条命令即可（`plugin_manager` 的 `install_bundle` 也接受同样的包名）：
 
-```powershell
-# 1) 装进 profile（CLI 转发给 pnpm，cwd = profile 目录）
-dsh plugin --profile web add <本仓库所在目录的绝对路径>
-
-# 2) 把包名加进 profile 的 bundle 列表（这一步决定它是否真的被当作层加载）
-#    文件：%USERPROFILE%\.dsh\profiles\web\package.json
-#      "dsh": { "profile": { "bundles": [ "...", "@jinngoo/dsh-workspace-conventions" ] } }
-#    或用 Web GUI：设置 → 插件 → 安装 Bundle（会同时完成 1 和 2）
-
-# 3) 校验组合结果里出现了这一行
-dsh --profile web --dump-config | Select-String workspace-conventions
-
-# 4) 重启 dsh（ESM 模块在进程内缓存）
+```bash
+dsh plugin --profile <profile> add @jinngoo/dsh-workspace-conventions
 ```
 
-发布到 registry 后就可以只写包名：`dsh plugin --profile web add @jinngoo/dsh-workspace-conventions`。
+安装后插件行由本包的 `cordis.patch.yml` 自动插入，**不需要**手改 profile 的 `cordis.patch.yml`；包名会自动进入 profile 的 `dsh.profile.bundles`。
+
+校验组合结果里出现了这一行：
+
+```bash
+dsh --profile <profile> --dump-config | grep workspace-conventions
+```
+
+### 本地开发安装
+
+克隆后先装依赖并构建（`link:` 安装的运行时依赖与 peer 都从 checkout 自己的 `node_modules` 解析，`lib/` 不入库）：
+
+```bash
+git clone git@github.com:Jinngoo/dsh-workspace-conventions.git
+cd dsh-workspace-conventions && pnpm install && pnpm build
+dsh plugin --profile <profile> add <本仓库所在目录的绝对路径>
+```
 
 ## 开发循环
 

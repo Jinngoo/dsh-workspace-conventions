@@ -40,16 +40,21 @@ describe('layer directories', () => {
 })
 
 describe('the global root', () => {
+  // resolveGlobalRoot 会对入参做 path.resolve：Windows 盘符路径在 POSIX 上是相对路径，
+  // 会被拼上 cwd 而永远不等于原值。夹具按平台取绝对路径，两个平台下语义才一致。
+  const EXPLICIT_HOME = process.platform === 'win32' ? join('D:', 'custom', 'home') : '/tmp/custom/home'
+  const ENV_HOME = process.platform === 'win32' ? join('E:', 'dsh-home') : '/tmp/dsh-home'
+
   it('prefers an explicit setting', () => {
-    expect(resolveGlobalRoot(join('D:', 'custom', 'home'))).toBe(join('D:', 'custom', 'home'))
+    expect(resolveGlobalRoot(EXPLICIT_HOME)).toBe(EXPLICIT_HOME)
   })
 
   it('follows $DSH_HOME when no setting is given, and ~/.dsh otherwise', () => {
     const previous = process.env['DSH_HOME']
     try {
-      process.env['DSH_HOME'] = join('E:', 'dsh-home')
-      expect(resolveGlobalRoot()).toBe(join('E:', 'dsh-home'))
-      expect(resolveGlobalRoot('   ')).toBe(join('E:', 'dsh-home'))
+      process.env['DSH_HOME'] = ENV_HOME
+      expect(resolveGlobalRoot()).toBe(ENV_HOME)
+      expect(resolveGlobalRoot('   ')).toBe(ENV_HOME)
 
       delete process.env['DSH_HOME']
       expect(resolveGlobalRoot()).toContain(DEFAULT_DIR)

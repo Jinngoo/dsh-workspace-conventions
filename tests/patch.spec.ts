@@ -247,8 +247,13 @@ describe('the patch files this repository actually ships', () => {
 
       const effective = resolveRow(bundle, [profile], ROW_ID)
       expect(effective.overridden).toBe(true)
-      expect(effective.effective?.['rulesPromptBytes']).not.toBe(effective.baseline?.['rulesPromptBytes'])
       expect(typeof effective.effective?.['rulesPromptBytes']).toBe('number')
+      // 覆盖的动机可以是任意字段（例如审批开关），不一定是预算。
+      // 这里只要求本机 profile 的覆盖确实改变了某一项配置，而不是固定挑 rulesPromptBytes。
+      const changedKeys = Object.keys(effective.effective ?? {}).filter(
+        (key) => JSON.stringify(effective.effective?.[key]) !== JSON.stringify(effective.baseline?.[key]),
+      )
+      expect(changedKeys.length).toBeGreaterThan(0)
     },
   )
 })
