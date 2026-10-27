@@ -214,34 +214,6 @@ describe('row wiring', () => {
   })
 })
 
-describe('the approval gate wiring', () => {
-  /** One pending call as the scheduler hands it to the waterfall. */
-  const pending = (args: Record<string, unknown>) => ({
-    name: 'memory_write',
-    arguments: args,
-    agent: AGENT,
-    callId: 'c1',
-    signal: new AbortController().signal,
-  })
-
-  it('asks before a global memory_write although the harness config omits the approval switches', async () => {
-    // The harness passes no `requestGlobalMemoryApproval` key: the row's defensive merge
-    // must default it to true, otherwise this cross-workspace write slips past.
-    const decision = await harness().preExecute(pending({ scope: 'global', content: '记住发布日' }))
-    expect(decision).toMatchObject({ kind: 'ask' })
-    const ask = decision as { readonly reason?: string, readonly displayReason?: { readonly en?: string, readonly zh?: string } }
-    expect(ask.reason).toContain('记住发布日')
-    expect(ask.displayReason?.en).toBeTruthy()
-    expect(ask.displayReason?.zh).toBeTruthy()
-  })
-
-  it('passes a workspace-scoped memory_write straight through', async () => {
-    const next = async () => ({ kind: 'allow' as const })
-    const decision = await harness().preExecute(pending({ scope: 'workspace', content: '项目事实' }), next)
-    expect(decision).toEqual({ kind: 'allow' })
-  })
-})
-
 describe('the rules layer', () => {
   it('injects a conditional book once a matching file is touched', async () => {
     const harnessRef = harness()

@@ -57,12 +57,10 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 
 ### 不属于这份文件的键（profile 行配置）
 
-这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些写入审批与情绪维护的开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致：
+这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些预算与情绪维护的开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致（0.8.0 起不再有写入同意开关）：
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `requestGlobalMemoryApproval` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 先请求一次性审批；带 `sandbox_permissions` 的调用由 escalation 审批合并；`false` 关闭该门 |
-| `requestPersonaWriteApproval` | `true` | `persona_write`（工作区与全局两个作用域）先请求一次性审批；`false` 关闭该门 |
 | `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
 | `globalMemoryBytes` | `4096` | 全局长期画像 `MEMORY.md` 的存储硬预算（0.7.0 新增）；超出的写入被拒绝并提示先精简 |
 | `globalIndexPromptBytes` | `4096` | 全局画像每轮注入的字节上限；超出截断并提示 `memory_read` |
@@ -81,7 +79,7 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 
 ## 两类错误，两种后果
 
-1. **未知键 / 类型不对**（如 `memroy: false`、`rules: sometimes`，或把属于行配置的 `requestGlobalMemoryApproval` 写在这里）——报错**并停用全部层**。
+1. **未知键 / 类型不对**（如 `memroy: false`、`rules: sometimes`，或把属于行配置的 `globalMemoryBytes` 写在这里）——报错**并停用全部层**。
    只报错却继续跑默认值，等于让那个开关静默失效，而这正是这份文件要防的事。
 2. **文件存在但读不了 / 解析不了**——同样停用全部层。
 

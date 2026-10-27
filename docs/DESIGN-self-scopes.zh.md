@@ -118,7 +118,7 @@ updated: 2026-10-23T00:12:00+08:00
 - **工具**：`memory_read` / `memory_search` / `memory_write` / `memory_promote` 增加 `scope: workspace | global | both`（默认 `workspace`；`search` 默认 `both`）；新增 `memory_revise`（仅 global，整篇重写）。全局作用域不再按天分册。
 - **写准入**：全局写入走同一套 `evaluateEntry`（密钥/PII 硬拒、流水账软拒）。全局比工作区更严格：`kind` 只接受 `preference|constraint|convention|decision`（事实/环境类默认留在工作区），防止"这个项目的一次性发现"污染全局。
 - **防膨胀**：`globalMemoryBytes`（默认 4 KB）是存储硬预算，超出的新增/重写被拒绝并提示先精简；`memory_revise` 的语义就是"读→融合/删减/改写→提交全文"，让全局画像可以被整理而不是只能变长。
-- **审批与授权分离**：全局写入先要一次性同意（`requestGlobalMemoryApproval`）；若当前文件策略写不到 `$DSH_HOME`，调用带 `sandbox_permissions` + `justification` 走 DSH 的 `approveEscalation` 按次升级——批准后仅该次调用放宽，带升级参数时同意闸门不再重复询问。
+- **写入与按次升级**：0.8.0 起插件不请求写入同意；若当前文件策略写不到 `$DSH_HOME`，调用带 `sandbox_permissions` + `justification` 走 DSH 的 `approveEscalation` 按次升级——批准后仅该次调用放宽，拒绝即失败、什么都不会写。
 
 ### 4.4 rules（规则）— 每轮注入，order 55（沿用）
 
@@ -199,12 +199,12 @@ workspace-conventions:
 | 60 | `workspace-memory`（既有） | `indexPromptBytes`（既有 7000） |
 
 - 全部沿用 `systemPrompt.context()`（**同步 provider**）：每作用域每层的文本异步探测进缓存，渲染时同步读缓存；`agent/created` 预热两套作用域。
-- 空目录 → 段落不出现（返回空串），零 token 开销。0.6.0 的写入审批（`tools/pre-execute`）与情绪维护段落的完整规格见 `DESIGN.zh.md`。
+- 空目录 → 段落不出现（返回空串），零 token 开销。0.6.0 引入的写入同意闸门已在 0.8.0 移除（写入只按文件策略与按次升级处理）；情绪维护段落的完整规格见 `DESIGN.zh.md`。
 
 
 ## 8. 全局写入的三个现实约束
 
-1. **沙箱策略**：全局文件在工作区之外，`workspace-write` 模式下写入会被拒绝。实现上写入前先预检目标路径是否在当前策略的可写根内：不可写时直接返回可执行的原因与升级指引，而不是"先问审批、再失败"。要让允许真正生效，调用带 `sandbox_permissions: "danger-full-access"` + `justification` 走 DSH 的 `approveEscalation`（按次升级，仅该次调用放宽）；带升级参数时 `requestGlobalMemoryApproval` / `requestPersonaWriteApproval` 的同意闸门不再重复询问。
+1. **沙箱策略**：全局文件在工作区之外，`workspace-write` 模式下写入会被拒绝。实现上写入前先预检目标路径是否在当前策略的可写根内：不可写时直接返回可执行的原因与升级指引。要让写入真正生效，调用带 `sandbox_permissions: "danger-full-access"` + `justification` 走 DSH 的 `approveEscalation`（按次升级，仅该次调用放宽）；拒绝即失败、什么都不会写。
 2. **并发**：多个工作区的会话共享同一份全局文件。写入用「临时文件 + rename」原子替换；追加用 `appendFile`；索引的读—改—写加一个 `memory/.lock`（`open('wx')` + 过期判定），拿不到锁时返回"稍后重试"而不是丢写入。
 3. **可见性**：全局写入成功后，下一个请求就会出现在所有工作区的注入里——这是特性，也是风险。所以 `memory_write scope=global` 的返回体会明确写"此条将对所有工作区可见"，并且准入门槛更高（见 4.3）。
 

@@ -61,9 +61,8 @@ kind: "package-reference"
     globalMemoryBytes: 4096
     globalRulesPromptBytes: 12288
     globalRoot: ''          # 空 = 跟随 $DSH_HOME，再退 ~/.dsh
-    # 0.6.0：写入审批与情绪维护（行配置，不能写进 .dsh/workspace.yml）
-    requestGlobalMemoryApproval: true
-    requestPersonaWriteApproval: true
+    # 0.6.0：情绪维护（行配置，不能写进 .dsh/workspace.yml）
+    # 0.8.0：写入不再有插件的同意闸门（原 request*Approval 已移除）
     moodProactive: true
 ```
 
@@ -81,13 +80,11 @@ kind: "package-reference"
 | `globalMemoryBytes` | `4096` | **0.7.0 新增**：全局长期画像 `MEMORY.md` 的存储硬预算；新增/重写超预算会被拒绝并提示先精简。 |
 | `globalRulesPromptBytes` | `12288` | 全局规则段落预算，与工作区规则分开。 |
 | `globalRoot` | `''` | 全局作用域根；空则跟随 `$DSH_HOME`，再退 `~/.dsh`。 |
-| `requestGlobalMemoryApproval` | `true` | 全局作用域的 `memory_write` / `memory_promote` / `memory_revise` 在工具体执行前请求一次性审批（带 `sandbox_permissions` 的调用由 escalation 审批合并）；`false` 关闭该门。**行配置**，不能写进 `.dsh/workspace.yml`。 |
-| `requestPersonaWriteApproval` | `true` | `persona_write`（工作区与全局两个作用域）请求一次性审批；`false` 关闭该门。行配置。 |
 | `moodProactive` | `true` | 是否注入 `workspace-mood-maintenance`（「情绪维护」）段落；还要求工作区 `mood` 层开着。行配置。 |
 
-最后三行是 **0.6.0 新增**的布尔开关，默认全 `true`。它们和字节预算同一条边界：属于 profile 组合里的**行配置**，一旦写进项目级 `.dsh/workspace.yml` 就会命中未知键错误（报错并停用所有层）。项目级能决定的仍是各层是否启用（`layers.*`）与是否继承全局（`inherit.*`）。
+`moodProactive` 是 **0.6.0 新增**的布尔开关，和字节预算同一条边界：属于 profile 组合里的**行配置**，一旦写进项目级 `.dsh/workspace.yml` 就会命中未知键错误（报错并停用所有层）。项目级能决定的仍是各层是否启用（`layers.*`）与是否继承全局（`inherit.*`）。
 
-**0.7.0** 追加 `globalMemoryBytes`，并把 `globalIndexPromptBytes` 默认提到 4096：全局记忆从「索引 + 日期流水」改为单文件长期画像后，存储预算与注入上限都按同一份画像计。
+**0.7.0** 追加 `globalMemoryBytes`，并把 `globalIndexPromptBytes` 默认提到 4096：全局记忆从「索引 + 日期流水」改为单文件长期画像后，存储预算与注入上限都按同一份画像计。**0.8.0** 移除了 `requestGlobalMemoryApproval` / `requestPersonaWriteApproval` 两个同意闸门：写入不再经插件的 `tools/pre-execute` 请求同意，按次升级仍由 DSH 的 escalation 通道负责。
 
 
 ### 它贡献的工具
@@ -98,14 +95,14 @@ kind: "package-reference"
 | `memory_status` | 报告工作区后端与全局画像的路径、大小、条目数、预算与继承开关。 |
 | `memory_read` | 读取工作区索引/某一天流水，或 `scope="global"` 的整篇画像。 |
 | `memory_search` | 在索引、全部流水与全局画像中做大小写不敏感的字面子串检索；默认 `scope=both`。 |
-| `memory_write` | 经准入审查后，向工作区当日流水追加一条持久条目；`scope="global"` 时写入全局画像的指定章节（四类结论，先要一次性审批或一次 escalation 授权）。 |
+| `memory_write` | 经准入审查后，向工作区当日流水追加一条持久条目；`scope="global"` 时写入全局画像的指定章节（四类结论；写 `$DSH_HOME` 时按需走一次 escalation）。 |
 | `memory_promote` | 在指定章节下向长期层加入一行，使其每轮都被注入；`scope="global"` 时写全局画像。 |
 | `memory_revise` | **0.7.0 新增**：整篇重写全局画像（融合、删减、改写），逐条准入 + 预算校验；这是防膨胀的常规做法。 |
 | `memory_help` | 说明当前生效的写入准则与准入策略（含全局 vs 工作区的判定）。 |
 | `rule_status` | 报告工作区与全局两套规则册的清单、分类、触发 glob 与已触发状态。 |
 | `rule_read` | 读取一册规则的完整正文（绕过 16 KB 注入上限）；`scope` 选作用域。 |
 | `persona_read` | 列人格片段清单或读某一片段全文（工作区同名遮蔽全局）。 |
-| `persona_write` | 写人格片段（`replace` / `append`）；密钥与 PII 硬拒，超预算硬拒；两个作用域都先要一次性审批（`requestPersonaWriteApproval`）。 |
+| `persona_write` | 写人格片段（`replace` / `append`）；密钥与 PII 硬拒，超预算硬拒；全局写入写 `$DSH_HOME` 时按需走一次 escalation。 |
 | `mood_get` | 读情绪原始状态与衰减后视图（年龄、权重、是否已平复、生效来源）。 |
 | `mood_set` | 写情绪状态，自动记 `updated`；只覆盖当前状态，不写历史。 |
 
@@ -139,17 +136,14 @@ kind: "package-reference"
 
 记忆系统的主要失效模式不是「存得太少」，而是「存得太多」：无节制增长的索引会污染每一轮的上下文。因此每次写入流水前都会先跑 `evaluateEntry`。硬性拒绝——密钥、私钥材料、PII、空或近乎空的内容——无法被绕过。软性提醒（主要是「这读起来像一次性流水账」）会**拒绝一次**并要求显式 `force`，这正是调用方把该行改写成持久结论的机会。
 
-### 写入审批：一次性、可审计的同意
+### 写入与按次升级
 
-准入审查是**模型侧的自律**：它能挡住密钥与流水账，却挡不住"一条技术上合规、但你不希望它跨工作区即时可见"的条目。0.6.0 把这一层交还给用户——`memory_write` / `memory_promote` 的 `scope="global"`，以及 `persona_write`（两个作用域），在工具体执行之前经 DSH 的 approval seam 请求一次同意。
+0.8.0 起插件不再请求写入同意：`tools/pre-execute` 的同意闸门与 `approval.ts` 一并移除。准入审查仍在（模型侧自律：密钥与流水账挡得住，但挡不住"技术上合规、跨工作区可见却不该写"的条目），用户侧的控制只剩**按次升级**。
 
-- **为什么是审批，而不是继续加提示词。** 提示词只能"建议模型谨慎"，无法证明用户真的看过；审批是 DSH 提供给插件的**唯一**可审计、可拒绝、且只授予一次执行的同意机制——`tools/pre-execute` 瀑布返回 `{kind:'ask', reason, displayReason}`，由 DSH 解析成回答，答复只覆盖这一次调用。拒绝、取消、或部署里没有应答方时，DSH 直接拒绝该调用，工具体从未执行，什么都不会写。不存在"问是问了，改还是改了"。
-- **只有一次，没有"总是允许"。** 每一次全局写入都是一次单独批准，也不提供本会话内放行。这道门本来就该让人稍微嫌烦：跨工作区可见的内容，不值得为省一次点击而放开。
-- **审批提示是有界摘要。** 内容前约 60 个字符（空白折叠为一行；人格则同时给出片段名），够判断"这是不是我刚写的那条结论"，又不把整段流水铺进审批 UI。
-- **人格两个作用域都设门。** 人格是每轮注入的身份层，改它不是"多一条记录"，而是这个工作区（或整个 profile）此后每次回答的语气与价值观。工作区人格的影响面比全局小，但同样每轮出现，所以 `persona_write` 不区分作用域。
-- **工作区记忆不设门。** 它按项目隔离、影响面局限在单个工作区，写错了下一轮就能改；加审批只会把"随手记一条"变成摩擦，反而促使模型不记。全局记忆则相反：一次写入立刻出现在**所有**工作区的注入里。
-- **已被工作区关掉的层不会被先问审批。** `memory` 为 `read-only` / `disabled`、`inherit.memory: false`、`persona` 层关闭、或全局人格被 `inherit.persona: false` 屏蔽时，门保持安静、把调用交给后续链路，由工具自己的拒绝作答——让用户批准一个必然失败的操作只是噪音。
-- **失败是关闭的。** 会话审批策略 `never`、或部署没有任何应答方时，这道门确定性拒绝而不是放行，模型看到可读的拒绝原因。宁可写不进去，也不在无人确认时静默写入。
+- **只有写不进去时才询问。** `$DSH_HOME` 在工作区之外，`workspace-write` 下写入被拒；调用带 `sandbox_permissions: "danger-full-access"` + `justification` 时，工具经 DSH 的 `approveEscalation` 请求一次同意，批准后**仅该次调用**放宽，会话权限模式不变。
+- **拒绝即失败。** 拒绝、取消、无应答方都是确定性拒绝，工具体不会执行，什么都不会写；没有"总是允许"。
+- **为什么移除写入同意闸门。** 它与文件策略正交：能弹的模式写不进去、能写的模式又弹不出来（完全权限预设捆绑 `approval: never`），结果多是"问了也白问"。同意统一交给 escalation 后，一次询问对应一次真实的按次授权，语义不再重叠。
+- **工作区记忆不需要门**：按项目隔离、写错下一轮就能改；全局画像的膨胀由准入与存储预算约束。
 - **这道门只管本插件自己的工具。** 模型仍可用通用 `write` / `edit` 直接改人格或情绪文件，那两条工具没有接审批。把通用文件工具纳入统一门禁是 phase 2 的工作；0.6.0 只保证"经本插件写入"这条路可审计，不假装它是完整边界。
 
 ### 情绪维护：为什么只能"鼓励"
