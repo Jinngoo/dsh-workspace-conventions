@@ -16,10 +16,7 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
   memory: read-only
   rules: true
   skills: false
-  persona: true
-  mood: true
   inherit:                     # 是否继承全局作用域（false = 屏蔽全局）
-    persona: true
     memory: false
 ```
 
@@ -41,33 +38,29 @@ workspace-conventions:         # 一个插件一段，键 = 该插件在组合�
 | `rules` | `true`（默认）/ `false` | 段落、条件册触发、`rule_read` / `rule_status` 一起开关（工作区与全局两套） |
 | `skills` | `true`（默认）/ `false` | `.workbuddy/skills` 是否发布进原生技能目录；关闭时该目录**不会**被扫描 |
 | `persona` | `true`（默认）/ `false` | 人格片段是否注入；关闭时 `persona_read` / `persona_write` 被拒 |
-| `mood` | `true`（默认）/ `false` | 情绪状态是否注入；关闭时 `mood_get` / `mood_set` 被拒 |
 | `memoryLayout` | `auto`（默认） | 新流水沿用目录里已有的布局 |
 | | `flat` | 新流水写在记忆目录下（`memory/YYYY-MM-DD.md`） |
 | | `host` | 新流水写在按计算机名分的子目录里（`memory/<计算机名>/YYYY-MM-DD.md`） |
-| `inherit` | 映射 | 四个键：`persona` / `mood` / `memory` / `rules`，默认全 `true`；`false` = 屏蔽该层的全局来源 |
+| `inherit` | 映射 | 四个键：`persona` / `memory` / `rules`，默认全 `true`；`false` = 屏蔽该层的全局来源 |
 
-`inherit` 的语义按层不同：人格与规则是**同名遮蔽**（工作区同名片段/册整体替换全局那份），情绪是**取最新一份**，记忆是**两段独立注入**（`inherit.memory: false` 时才消失）。屏蔽对工具同样生效：`memory_*` / `rule_read` 的 `scope="global"` 会被拒，`persona_write` / `mood_set` 的全局写入同样被拒——只掐注入不掐工具，等于让开关变成装饰。
+`inherit` 的语义按层不同：人格与规则是**同名遮蔽**（工作区同名片段/册整体替换全局那份），记忆是**两段独立注入**（`inherit.memory: false` 时才消失）。屏蔽对工具同样生效：`memory_*` / `rule_read` 的 `scope="global"` 会被拒，`persona_write` / `mood_set` 的全局写入同样被拒——只掐注入不掐工具，等于让开关变成装饰。
 
 `memory` 为什么只读时也不注入段落：该段落承载的就是索引正文本身。只读工作区仍可用读工具取到同样内容，每轮再注入一遍只是重复付费。
 
 `memoryLayout` 只管**下一次写到哪里**：它不搬动、也不隐藏已经存在的流水，读取仍按目录实际形状进行。`auto` 保留原有行为——目录里已有按机器分放的流水或计算机名子目录，就继续那样写。
 
-`memoryLayout` **只属于 memory**：persona / mood / rules 没有对应键。布局是「追加型、按日期分片」数据的分片策略，不是通用开关；人格/规则是可按名字 review 的低频整文件，情绪是覆盖写的短命状态，给它们分机器目录会换来身份/规则分裂或注入文本抖动。完整理由见 [DESIGN.zh.md](DESIGN.zh.md) 的「为什么只有 memory 有布局（persona / mood / rules 不做）」。
+`memoryLayout` **只属于 memory**：persona / rules 没有对应键。布局是「追加型、按日期分片」数据的分片策略，不是通用开关；人格/规则是可按名字 review 的低频整文件，情绪是覆盖写的短命状态，给它们分机器目录会换来身份/规则分裂或注入文本抖动。完整理由见 [DESIGN.zh.md](DESIGN.zh.md) 的「为什么只有 memory 有布局（persona / mood / rules 不做）」。
 
 ### 不属于这份文件的键（profile 行配置）
 
-这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些预算与情绪维护的开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致（0.8.0 起不再有写入同意开关）：
+这份文件只回答**按项目变化**的问题：层是否启用、是否继承全局、新流水写到哪。另一些预算与审批开关属于 **profile 的行配置**——`cordis.patch.yml` 里 `workspace-conventions` 那一行的 `config:`，随进程生效，对该 profile 的所有工作区一致（0.8.0 起不再有写入同意开关）：
 
 | 键 | 默认 | 含义 |
 |---|---|---|
-| `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
 | `globalMemoryBytes` | `4096` | 全局长期画像 `MEMORY.md` 的存储硬预算（0.7.0 新增）；超出的写入被拒绝并提示先精简 |
 | `globalIndexPromptBytes` | `4096` | 全局画像每轮注入的字节上限；超出截断并提示 `memory_read` |
 
 把这些键写进 `.dsh/workspace.yml` 会命中下面的「未知键」错误：**报错并停用所有层**。这是刻意的——行配置是部署策略，不该被单个项目悄悄覆盖；反过来，项目级开关（`layers.*`、`inherit.*`）只由这份文件解释，不出现在 profile 里。
-
-于是按项目能控制的只有 `mood` / `inherit.mood`：要关掉情绪维护只能整体关情绪层；想保留情绪层、只关主动提醒，只能改 profile 的行配置（对该 profile 的所有工作区生效）。
 
 ## 文件会被自动创建
 

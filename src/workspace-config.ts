@@ -68,8 +68,6 @@ export type MemoryLayoutPreference = 'auto' | 'flat' | 'host'
 export interface InheritConfig {
   /** `true` merges the global persona fragments; `false` blocks them. */
   readonly persona: boolean
-  /** `true` may fall back to the global mood state; `false` blocks it. */
-  readonly mood: boolean
   /** `true` injects and reads the global memory index; `false` blocks it. */
   readonly memory: boolean
   /** `true` injects the global rule books; `false` blocks them. */
@@ -86,8 +84,6 @@ export interface LayerConfig {
   readonly skills: boolean
   /** `true` injects persona fragments, `false` disables the layer. */
   readonly persona: boolean
-  /** `true` injects the mood state, `false` disables the layer. */
-  readonly mood: boolean
   /** Whether each layer inherits the global scope's counterpart. */
   readonly inherit: InheritConfig
   /** Which layout new ledgers use. */
@@ -100,13 +96,12 @@ export const DEFAULT_LAYERS: LayerConfig = {
   rules: true,
   skills: true,
   persona: true,
-  mood: true,
-  inherit: { persona: true, mood: true, memory: true, rules: true },
+  inherit: { persona: true, memory: true, rules: true },
   memoryLayout: 'auto',
 }
 
 /** The global scope is inherited by default; blocking one layer is a per-workspace opt-out. */
-export const DEFAULT_INHERIT: InheritConfig = { persona: true, mood: true, memory: true, rules: true }
+export const DEFAULT_INHERIT: InheritConfig = { persona: true, memory: true, rules: true }
 
 /**
  * What a file that could not be read or understood resolves to: every layer
@@ -122,7 +117,6 @@ const FAIL_CLOSED: LayerConfig = {
   rules: false,
   skills: false,
   persona: false,
-  mood: false,
   inherit: DEFAULT_INHERIT,
   memoryLayout: 'auto',
 }
@@ -228,7 +222,6 @@ interface MutableLayers {
   rules: boolean
   skills: boolean
   persona: boolean
-  mood: boolean
   inherit: InheritConfig
   memoryLayout: MemoryLayoutPreference
 }
@@ -287,7 +280,7 @@ function applySection(
       continue
     }
 
-    if (key === 'rules' || key === 'skills' || key === 'persona' || key === 'mood') {
+    if (key === 'rules' || key === 'skills' || key === 'persona') {
       const enabled = readToggle(raw, `${name}.${key}`, issues)
       if (enabled !== undefined) layers[key] = enabled
       continue
@@ -306,7 +299,7 @@ function applySection(
 
     issues.push({
       line: 0,
-      message: `\`${name}\` has an unknown key \`${key}\`; this plugin understands \`memory\`, \`memoryLayout\`, \`rules\`, \`skills\`, \`persona\`, \`mood\`, \`inherit\``,
+      message: `\`${name}\` has an unknown key \`${key}\`; this plugin understands \`memory\`, \`memoryLayout\`, \`rules\`, \`skills\`, \`persona\`, \`inherit\``,
     })
   }
 }
@@ -330,10 +323,10 @@ function applyInherit(raw: PatchValue, where: string, layers: MutableLayers, iss
   }
   for (const key of Object.keys(raw)) {
     const value = Reflect.get(raw, key) as PatchValue
-    if (key !== 'persona' && key !== 'mood' && key !== 'memory' && key !== 'rules') {
+    if (key !== 'persona' && key !== 'memory' && key !== 'rules') {
       issues.push({
         line: 0,
-        message: `\`${where}\` has an unknown layer \`${key}\`; it understands \`persona\`, \`mood\`, \`memory\`, \`rules\``,
+        message: `\`${where}\` has an unknown layer \`${key}\`; it understands \`persona\`, \`memory\`, \`rules\``,
       })
       continue
     }
@@ -419,13 +412,11 @@ export const WORKSPACE_CONFIG_TEMPLATE = `# 项目级工作区配置（DSH）。
 #   rules: true
 #   skills: true
 #   persona: true
-#   mood: true
 #   memoryLayout: auto       # auto | flat | host
 #
 #   # 第二轴：是否继承全局作用域（false = 屏蔽全局，只看本工作区）
 #   inherit:
 #     persona: true
-#     mood: true
 #     memory: true
 #     rules: true
 `

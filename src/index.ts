@@ -84,17 +84,6 @@ import {
   type RuleDefinition,
 } from './rules.js'
 import {
-  DEFAULT_MOOD_HALF_LIFE_HOURS,
-  DEFAULT_MOOD_MAX_AGE_HOURS,
-  MOOD_FILE_NAME,
-  buildMoodDocument,
-  moodView,
-  parseMoodDocument,
-  renderMoodMaintenanceSection,
-  renderMoodSection,
-  type MoodState,
-} from './mood.js'
-import {
   mergePersona,
   parsePersonaFragment,
   renderPersonaSection,
@@ -155,16 +144,6 @@ export {
 }
 export { detectSectionLevel, parseIndexDocument } from './memory.js'
 export {
-  DEFAULT_MOOD_HALF_LIFE_HOURS,
-  DEFAULT_MOOD_MAX_AGE_HOURS,
-  MOOD_FILE_NAME,
-  buildMoodDocument,
-  moodView,
-  parseMoodDocument,
-  renderMoodMaintenanceSection,
-  renderMoodSection,
-} from './mood.js'
-export {
   mergePersona,
   parsePersonaFragment,
   renderPersonaSection,
@@ -180,7 +159,6 @@ export {
   workspaceLayerDir,
 } from './scope.js'
 export { DEFAULT_INHERIT } from './workspace-config.js'
-export type { MoodDecayOptions, MoodRenderOptions, MoodState, MoodView } from './mood.js'
 export type { PersonaFragment, PersonaMerge, PersonaRender, PersonaRenderOptions } from './persona.js'
 export type { LayerName, LayerScope } from './scope.js'
 export { parseFrontmatter, readFrontmatterBoolean } from './frontmatter.js'
@@ -220,12 +198,6 @@ export interface Config {
   personaPromptBytes: number
   /** Per-fragment byte cap; a longer fragment is truncated and pointed at by `persona_read`. */
   personaFileBytes: number
-  /** Byte cap on the injected mood line. Deliberately tiny: a mood is one line of state. */
-  moodPromptBytes: number
-  /** Half-life of the mood decay, in hours. After one half-life the state reads half as strong. */
-  moodHalfLifeHours: number
-  /** Age after which a mood is reported as settled instead of current. */
-  moodMaxAgeHours: number
   /** Byte cap on the global (cross-workspace) memory index section. */
   globalIndexPromptBytes: number
   /**
@@ -243,17 +215,11 @@ export interface Config {
    * and falls back to `~/.dsh`, matching DSH's own home resolution.
    *
    * The default puts the four global layer directories at `$DSH_HOME/{persona,
-   * mood,memory,rules}` — names DSH itself does not use today. If a future
+   * memory,rules}` — names DSH itself does not use today. If a future
    * mechanism claims one of them, pointing this at a private directory moves
    * every global layer without a code change.
    */
   globalRoot: string
-  /**
-   * Encourage the model to update the workspace mood opportunistically while
-   * the mood layer is on. This only adds a short prompt section; it never writes
-   * on its own and never forces a call. `false` removes the section entirely.
-   */
-  moodProactive: boolean
 }
 
 /** Every config default in one object: the row schema and the defensive merge both read it. */
@@ -263,14 +229,10 @@ const CONFIG_DEFAULTS: Config = {
   ruleFileBytes: RULE_FILE_BYTES,
   personaPromptBytes: 3 * 1024,
   personaFileBytes: 8 * 1024,
-  moodPromptBytes: 512,
-  moodHalfLifeHours: DEFAULT_MOOD_HALF_LIFE_HOURS,
-  moodMaxAgeHours: DEFAULT_MOOD_MAX_AGE_HOURS,
   globalIndexPromptBytes: 4 * 1024,
   globalMemoryBytes: 4 * 1024,
   globalRulesPromptBytes: 12 * 1024,
   globalRoot: '',
-  moodProactive: true,
 }
 
 /** Runtime schema for the row. */
@@ -280,14 +242,10 @@ export const Config: z<Config> = z.object({
   ruleFileBytes: z.number().default(CONFIG_DEFAULTS.ruleFileBytes),
   personaPromptBytes: z.number().default(CONFIG_DEFAULTS.personaPromptBytes),
   personaFileBytes: z.number().default(CONFIG_DEFAULTS.personaFileBytes),
-  moodPromptBytes: z.number().default(CONFIG_DEFAULTS.moodPromptBytes),
-  moodHalfLifeHours: z.number().default(CONFIG_DEFAULTS.moodHalfLifeHours),
-  moodMaxAgeHours: z.number().default(CONFIG_DEFAULTS.moodMaxAgeHours),
   globalIndexPromptBytes: z.number().default(CONFIG_DEFAULTS.globalIndexPromptBytes),
   globalMemoryBytes: z.number().default(CONFIG_DEFAULTS.globalMemoryBytes),
   globalRulesPromptBytes: z.number().default(CONFIG_DEFAULTS.globalRulesPromptBytes),
   globalRoot: z.string().default(CONFIG_DEFAULTS.globalRoot),
-  moodProactive: z.boolean().default(CONFIG_DEFAULTS.moodProactive),
 })
 
 /** The resolved state of one workspace's memory store. */
@@ -403,13 +361,9 @@ export function apply(ctx: Context, config: Config): void {
   const ruleFileBytes = config.ruleFileBytes
   const personaPromptBytes = config.personaPromptBytes
   const personaFileBytes = config.personaFileBytes
-  const moodPromptBytes = config.moodPromptBytes
-  const moodHalfLifeHours = config.moodHalfLifeHours
-  const moodMaxAgeHours = config.moodMaxAgeHours
   const globalIndexPromptBytes = config.globalIndexPromptBytes
   const globalMemoryBytes = config.globalMemoryBytes
   const globalRulesPromptBytes = config.globalRulesPromptBytes
-  const moodProactive = config.moodProactive
   const fs = ctx.fs
   const agents = ctx.agents
   const prompt = ctx.systemPrompt
@@ -420,20 +374,11 @@ export function apply(ctx: Context, config: Config): void {
   const cache = new Map<string, WorkspaceMemoryState>()
   const rulesCache = new Map<string, WorkspaceRulesState>()
   const personaCache = new Map<string, WorkspacePersonaState>()
-  /**
-   * One mood state per workspace, plus the single global mood.
-   *
-   * `null` means "probed and absent", which is a different answer from "not
-   * probed yet": the prompt provider must warm up on the first case, and stay
-   * silent on the second rather than claiming a settled mood nobody wrote.
-   */
-  const moodCache = new Map<string, MoodState | null>()
   const globalCache: {
     memory: GlobalMemoryState | undefined
     rules: readonly RuleDefinition[] | undefined
     persona: readonly PersonaFragment[] | undefined
-    mood: MoodState | null | undefined
-  } = { memory: undefined, rules: undefined, persona: undefined, mood: undefined }
+  } = { memory: undefined, rules: undefined, persona: undefined }
   /** Project-level switches per workspace, from `.dsh/workspace.yml`. */
   const configCache = new Map<string, { readonly config: ParsedWorkspaceConfig, readonly stamp: string | undefined }>()
   /**
@@ -645,16 +590,6 @@ export function apply(ctx: Context, config: Config): void {
     return state
   }
 
-  /** Read one workspace's mood state into the cache; `null` records "absent". */
-  const loadMood = async (workspace: string): Promise<MoodState | null> => {
-    const dir = workspaceLayerDir(workspace, 'mood')
-    const raw = await readAt(join(dir, MOOD_FILE_NAME))
-    const parsed: { state?: MoodState, issue?: string } = raw === undefined ? {} : parseMoodDocument(raw)
-    if (parsed.issue !== undefined) ctx.logger.warn(`${toPosix(dir)}: ${parsed.issue}`)
-    const state = parsed.state ?? null
-    moodCache.set(workspace, state)
-    return state
-  }
 
   /**
    * Read the global memory document into the cache.
@@ -711,16 +646,6 @@ export function apply(ctx: Context, config: Config): void {
     return read.fragments
   }
 
-  /** Read the global mood state into the cache; `null` records "absent". */
-  const loadGlobalMood = async (): Promise<MoodState | null> => {
-    const dir = globalLayerDir(globalRoot, 'mood')
-    const raw = await readAt(join(dir, MOOD_FILE_NAME))
-    const parsed: { state?: MoodState, issue?: string } = raw === undefined ? {} : parseMoodDocument(raw)
-    if (parsed.issue !== undefined) ctx.logger.warn(`${toPosix(dir)}: ${parsed.issue}`)
-    const state = parsed.state ?? null
-    globalCache.mood = state
-    return state
-  }
 
   /**
    * Reload the whole global scope.
@@ -732,7 +657,6 @@ export function apply(ctx: Context, config: Config): void {
     void loadGlobalMemory().catch(() => undefined)
     void loadGlobalRules().catch(() => undefined)
     void loadGlobalPersona().catch(() => undefined)
-    void loadGlobalMood().catch(() => undefined)
   }
 
   /** Load the global scope the first time any workspace is probed. */
@@ -745,7 +669,6 @@ export function apply(ctx: Context, config: Config): void {
     void loadState(workspace).catch(() => undefined)
     void loadRules(workspace).catch(() => undefined)
     void loadPersona(workspace).catch(() => undefined)
-    void loadMood(workspace).catch(() => undefined)
     ensureGlobal()
     // `configFor`, not `loadConfig`: this is the live provider path, so it is the
     // one that seeds a missing starter file and revalidates a changed one.
@@ -865,13 +788,13 @@ export function apply(ctx: Context, config: Config): void {
     workspace === undefined ? undefined : configCache.get(workspace)?.config
 
   /** The verdict on one layer, from the cache only. */
-  const layerOn = (workspace: string | undefined, layer: 'rules' | 'skills' | 'persona' | 'mood'): boolean => {
+  const layerOn = (workspace: string | undefined, layer: 'rules' | 'skills' | 'persona'): boolean => {
     const cached = cachedConfig(workspace)
     return cached === undefined ? DEFAULT_LAYERS[layer] : cached.layers[layer]
   }
 
   /** Whether one layer may also read the global scope, from the cache only. */
-  const inheritOn = (workspace: string | undefined, layer: 'persona' | 'mood' | 'memory' | 'rules'): boolean => {
+  const inheritOn = (workspace: string | undefined, layer: 'persona' | 'memory' | 'rules'): boolean => {
     const cached = cachedConfig(workspace)
     return cached === undefined ? true : cached.layers.inherit[layer]
   }
@@ -886,12 +809,12 @@ export function apply(ctx: Context, config: Config): void {
    * reported here in full, because in that state every layer is refused and the
    * prompt is empty — this message is then the only place the reason appears.
    */
-  const refuseLayer = async (workspace: string, layer: 'memory' | 'rules' | 'skills' | 'persona' | 'mood'): Promise<JsonValue | undefined> => {
+  const refuseLayer = async (workspace: string, layer: 'memory' | 'rules' | 'skills' | 'persona'): Promise<JsonValue | undefined> => {
     const config = await configFor(workspace)
     const off = layer === 'memory' ? config.layers.memory === 'disabled' : config.layers[layer] === false
     if (!off) return undefined
 
-    const label = layer === 'persona' ? 'persona（人格）' : layer === 'mood' ? 'mood（情绪）' : layer
+    const label = layer === 'persona' ? 'persona（人格）' : layer
     const issues = config.issues.map((issue) => (issue.line > 0 ? `line ${String(issue.line)}: ${issue.message}` : issue.message))
     return {
       ok: false,
@@ -990,33 +913,6 @@ export function apply(ctx: Context, config: Config): void {
     return lines.join('\n')
   }
 
-  /**
-   * The freshest mood state this workspace may see.
-   *
-   * Moods are not blended: a two-minute-old project state and a week-old global
-   * one are not the same kind of signal, and averaging them would invent a state
-   * nobody wrote. The newest wins, and a state whose `updated` cannot be parsed
-   * never wins over one that can.
-   */
-  const effectiveMood = (workspace: string, now: Date): MoodState | undefined => {
-    const candidates: MoodState[] = []
-    const local = moodCache.get(workspace)
-    if (local !== undefined && local !== null) candidates.push(local)
-    if (inheritOn(workspace, 'mood')) {
-      const shared = globalCache.mood
-      if (shared !== undefined && shared !== null) candidates.push(shared)
-    }
-    let best: MoodState | undefined
-    let bestAge = Number.POSITIVE_INFINITY
-    for (const candidate of candidates) {
-      const view = moodView(candidate, now, { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours })
-      if (view.ageHours < bestAge) {
-        bestAge = view.ageHours
-        best = candidate
-      }
-    }
-    return best
-  }
 
   /** Render the global long-lived memory section from a cached snapshot. Total: it never throws. */
   const renderGlobalMemory = (state: GlobalMemoryState): string => {
@@ -1882,8 +1778,8 @@ export function apply(ctx: Context, config: Config): void {
   ctx.tools.register(defineTool({
     name: 'self_status',
     description:
-      '报告「自我层」全景：persona（人格）、mood（情绪）、rules（规则）、memory（记忆）四层在两个作用域（工作区 / 全局）下的目录、文件数、字节、'
-      + '注入预算、继承开关、情绪衰减结果与阻塞原因。排查「为什么某层没生效」先看这里。',
+      '报告「自我层」全景：persona（人格）、rules（规则）、memory（记忆）三层在两个作用域（工作区 / 全局）下的目录、文件数、字节、'
+      + '注入预算、继承开关与阻塞原因。排查「为什么某层没生效」先看这里。',
     parameters: {},
     output: jsonOutput,
     async execute(): Promise<JsonValue> {
@@ -1892,28 +1788,10 @@ export function apply(ctx: Context, config: Config): void {
       const config = await configFor(workspace)
       const localPersona = await loadPersona(workspace)
       const sharedPersona = globalCache.persona ?? await loadGlobalPersona()
-      const localMood = moodCache.get(workspace) ?? await loadMood(workspace)
-      const sharedMood = globalCache.mood === undefined ? await loadGlobalMood() : globalCache.mood
       const localRules = await rulesFor(workspace)
       const sharedRules = globalCache.rules ?? await loadGlobalRules()
       const localMemory = await stateFor(workspace)
       const sharedMemory = globalCache.memory ?? await loadGlobalMemory()
-      const now = new Date()
-      const decay = { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours }
-      const describeMood = (state: MoodState | null): JsonValue => {
-        if (state === null) return { present: false } as unknown as JsonValue
-        const view = moodView(state, now, decay)
-        return {
-          present: true,
-          label: state.label,
-          updated: state.updated ?? null,
-          ageHours: Number.isFinite(view.ageHours) ? Math.round(view.ageHours * 10) / 10 : null,
-          weight: Math.round(view.weight * 100) / 100,
-          fresh: view.fresh,
-          text: view.text,
-        } as unknown as JsonValue
-      }
-      const effective = effectiveMood(workspace, now)
       return {
         ok: true,
         workspace: toPosix(workspace),
@@ -1935,16 +1813,6 @@ export function apply(ctx: Context, config: Config): void {
               fragments: sharedPersona.map((f) => ({ name: f.name, title: f.title, bytes: f.bytes, order: f.order })),
               shadowedByWorkspace: mergePersona(sharedPersona, localPersona.fragments).shadowed.map((f) => f.name),
             },
-          },
-          mood: {
-            enabled: config.layers.mood,
-            inherited: config.layers.inherit.mood,
-            budgetBytes: moodPromptBytes,
-            halfLifeHours: moodHalfLifeHours,
-            maxAgeHours: moodMaxAgeHours,
-            workspace: { dir: toPosix(workspaceLayerDir(workspace, 'mood')), ...describeMood(localMood) as object },
-            global: { dir: toPosix(globalLayerDir(globalRoot, 'mood')), ...describeMood(sharedMood) as object },
-            effective: effective === undefined ? null : { label: effective.label, updated: effective.updated ?? null },
           },
           rules: {
             enabled: config.layers.rules,
@@ -1975,9 +1843,9 @@ export function apply(ctx: Context, config: Config): void {
           skills: { enabled: config.layers.skills, note: '技能只有工作区来源（.workbuddy/skills）；全局技能由 DSH 原生的 $DSH_HOME/skills 提供，本插件不接管。' },
         },
         notes: [
-          '全局层位于 $DSH_HOME/{persona,mood,memory,rules}；可用行配置 globalRoot 整体搬家。',
-          '工作区同名 persona 片段会整体遮蔽全局那一份；情绪取「最新一份」而不混合。',
-          '每个工作区可用 .dsh/workspace.yml 的 inherit.{persona,mood,memory,rules} 屏蔽对应全局层。',
+          '全局层位于 $DSH_HOME/{persona,memory,rules}；可用行配置 globalRoot 整体搬家。',
+          '工作区同名 persona 片段会整体遮蔽全局那一份。',
+          '每个工作区可用 .dsh/workspace.yml 的 inherit.{persona,memory,rules} 屏蔽对应全局层。',
         ],
       } as unknown as JsonValue
     },
@@ -2115,135 +1983,6 @@ export function apply(ctx: Context, config: Config): void {
     },
   }))
 
-  ctx.tools.register(defineTool({
-    name: 'mood_get',
-    description:
-      '读取当前情绪状态（工作区与全局各一份，含衰减后的强度、年龄与是否已平复）。情绪是一个有时效的小状态，不写历史流水。',
-    parameters: { scope: { type: 'string' as const, enum: ['workspace', 'global', 'both'], description: '默认 both' } },
-    output: jsonOutput,
-    async execute(args): Promise<JsonValue> {
-      const workspace = currentWorkspace()
-      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const scope = scopeArg(args.scope, 'both')
-      const config = await configFor(workspace)
-      const now = new Date()
-      const decay = { halfLifeHours: moodHalfLifeHours, maxAgeHours: moodMaxAgeHours }
-      const describe = (state: MoodState | null): JsonValue => {
-        if (state === null) return { present: false } as unknown as JsonValue
-        const view = moodView(state, now, decay)
-        return {
-          present: true,
-          label: state.label,
-          valence: state.valence ?? null,
-          arousal: state.arousal ?? null,
-          updated: state.updated ?? null,
-          body: state.body,
-          ageHours: Number.isFinite(view.ageHours) ? Math.round(view.ageHours * 10) / 10 : null,
-          weight: Math.round(view.weight * 100) / 100,
-          fresh: view.fresh,
-          text: view.text,
-        } as unknown as JsonValue
-      }
-      const local = scope === 'global' ? null : moodCache.get(workspace) ?? await loadMood(workspace)
-      const shared = scope === 'workspace' ? null : globalCache.mood === undefined ? await loadGlobalMood() : globalCache.mood
-      const effective = effectiveMood(workspace, now)
-      return {
-        ok: true,
-        scope,
-        decay,
-        effective: effective === undefined ? null : { label: effective.label, updated: effective.updated ?? null },
-        workspace: describe(local),
-        global: { inherited: config.layers.inherit.mood, ...describe(shared) as object },
-        note: '取「最新一份」而不是混合；超过 maxAgeHours 或权重低于 0.05 会被视为已平复。',
-      } as unknown as JsonValue
-    },
-  }))
-
-  ctx.tools.register(defineTool({
-    name: 'mood_set',
-    description:
-      '写入当前情绪状态（覆盖 current.md，自动记 updated）。情绪只描述此刻的倾向与唤醒度，不是记忆：需要留档的结论请用 memory_write。',
-    parameters: {
-      label: { type: 'string' as const, required: true, description: '情绪名，如 专注、烦躁、轻松' },
-      scope: { type: 'string' as const, enum: ['workspace', 'global'], description: 'workspace（默认，本项目）/ global（跨工作区整体状态）' },
-      valence: { type: 'number' as const, description: '-1 消极 … +1 积极（可选）' },
-      arousal: { type: 'number' as const, description: '0 平静 … 1 亢奋（可选）' },
-      note: { type: 'string' as const, description: '一两句备注（可选，最多 1024 字节）' },
-      sandbox_permissions: { type: 'string' as const, enum: ['workspace-write', 'danger-full-access'], description: 'scope=global 且当前策略写不到 $DSH_HOME 时使用：请求一次升级' },
-      justification: { type: 'string' as const, description: '与 sandbox_permissions 成对出现：一句给用户看的理由（用用户当前语言）' },
-    },
-    output: jsonOutput,
-    async execute(args, exec): Promise<JsonValue> {
-      const workspace = currentWorkspace()
-      if (workspace === undefined) return { ok: false, error: '无法确定当前会话的工作区' } as unknown as JsonValue
-      const scope = scopeArg(args.scope, 'workspace') === 'global' ? 'global' : 'workspace'
-      const config = await configFor(workspace)
-      if (!config.layers.mood) {
-        const refused = await refuseLayer(workspace, 'mood')
-        if (refused !== undefined) return refused
-      }
-      if (scope === 'global' && !config.layers.inherit.mood) {
-        return {
-          ok: false,
-          error: `本工作区屏蔽了全局情绪（${WORKSPACE_CONFIG_REL} 的 ${CONFIG_SECTION}.inherit.mood: false）`,
-          configFile: config.rel,
-        } as unknown as JsonValue
-      }
-      const now = new Date()
-      let document: string
-      try {
-        document = buildMoodDocument({
-          label: args.label,
-          ...args.valence !== undefined ? { valence: args.valence } : {},
-          ...args.arousal !== undefined ? { arousal: args.arousal } : {},
-          ...args.note !== undefined ? { note: args.note } : {},
-        }, now)
-      } catch (error) {
-        return { ok: false, error: `情绪参数无效：${error instanceof Error ? error.message : String(error)}` } as unknown as JsonValue
-      }
-      const dir = scope === 'global' ? globalLayerDir(globalRoot, 'mood') : workspaceLayerDir(workspace, 'mood')
-      const path = join(dir, MOOD_FILE_NAME)
-      const policy = scope === 'global' ? await writePolicyFor('mood_set', args, exec) : undefined
-      if (scope === 'global' && !policyWritable(policy, path)) {
-        return {
-          ok: false,
-          scope,
-          error: '当前权限模式写不到全局情绪文件（$DSH_HOME 在工作区之外）',
-          hint: '带 sandbox_permissions: "danger-full-access" 与 justification 重试，用户批准后仅本次写入生效。',
-        } as unknown as JsonValue
-      }
-      let written: string
-      try {
-        written = await writeAt(path, document, currentSession(), policy)
-      } catch (error) {
-        return {
-          ok: false,
-          scope,
-          error: `写入被拒绝：${error instanceof Error ? error.message : String(error)}`,
-          hint: scope === 'global' ? '全局情绪在 $DSH_HOME 下，workspace-write 策略不允许写工作区之外' : '当前策略不允许写该路径',
-        } as unknown as JsonValue
-      }
-      const parsed = parseMoodDocument(document)
-      if (scope === 'global') globalCache.mood = parsed.state ?? null
-      else moodCache.set(workspace, parsed.state ?? null)
-      return {
-        ok: true,
-        written: true,
-        scope,
-        ...scope === 'global' ? { visibleTo: '所有工作区（下一个请求即生效）' } : {},
-        path: written,
-        state: parsed.state === undefined
-          ? { label: args.label }
-          : {
-              label: parsed.state.label,
-              valence: parsed.state.valence ?? null,
-              arousal: parsed.state.arousal ?? null,
-              updated: parsed.state.updated ?? null,
-            },
-      } as unknown as JsonValue
-    },
-  }))
-
   ctx.effect(() => prompt.context({
     name: 'workspace-persona',
     order: 50,
@@ -2266,62 +2005,6 @@ export function apply(ctx: Context, config: Config): void {
       } catch { return '' }
     },
   }), 'workspace-conventions.persona')
-
-  ctx.effect(() => prompt.context({
-    name: 'workspace-mood',
-    order: 52,
-    text: (assembly: { readonly agent?: unknown }) => {
-      try {
-        const agent = assembly.agent
-        const workspace = workspaceOf(agent)
-        if (workspace === undefined) return ''
-        const session = sessionOf(agent)
-        if (session !== undefined) sessions.set(workspace, session)
-        if (!layerOn(workspace, 'mood')) return ''
-        if (moodCache.get(workspace) === undefined) {
-          refresh(workspace)
-          return ''
-        }
-        const now = new Date()
-        return renderMoodSection(effectiveMood(workspace, now), now, {
-          halfLifeHours: moodHalfLifeHours,
-          maxAgeHours: moodMaxAgeHours,
-          maxBytes: moodPromptBytes,
-          renderQuiet: true,
-        })
-      } catch { return '' }
-    },
-  }), 'workspace-conventions.mood')
-
-  // The mood layer is only a tool: nothing is written unless the model decides
-  // to call `mood_set`. This section is the one thing the plugin can do about
-  // that — name the moments worth recording, and say explicitly that a quiet
-  // turn is not worth a write. It renders switches and caches only, so it stays
-  // synchronous like every provider here and costs 0 tokens when off.
-  ctx.effect(() => prompt.context({
-    name: 'workspace-mood-maintenance',
-    order: 53,
-    text: (assembly: { readonly agent?: unknown }) => {
-      try {
-        const agent = assembly.agent
-        const workspace = workspaceOf(agent)
-        if (workspace === undefined) return ''
-        const session = sessionOf(agent)
-        if (session !== undefined) sessions.set(workspace, session)
-        if (!moodProactive || !layerOn(workspace, 'mood')) return ''
-        // "No record yet" may only be claimed after both scopes were probed and
-        // both came back empty. An unprobed store stays silent rather than
-        // inviting a duplicate first write on the warm-up turn.
-        const local = moodCache.get(workspace)
-        const shared = globalCache.mood
-        const missingRecord = local === null
-          && (inheritOn(workspace, 'mood')
-            ? shared !== undefined && shared === null
-            : true)
-        return renderMoodMaintenanceSection({ missingRecord })
-      } catch { return '' }
-    },
-  }), 'workspace-conventions.mood-maintenance')
 
   ctx.effect(() => prompt.context({
     name: 'global-rules',

@@ -1,11 +1,11 @@
 /**
  * 双层作用域：`workspace`（`<workspace>/.dsh`）与 `global`（默认 `$DSH_HOME`）。
  *
- * 每一层（persona / mood / memory / rules）在两个作用域下各有一份目录，本模块
+ * 每一层（persona / memory / rules）在两个作用域下各有一份目录，本模块
  * 只负责「作用域 → 根目录 → 层目录」的解析，不读文件、不碰缓存，因此可以纯函数
  * 测试。目录名统一从 {@link ./layout.ts} 取，避免两层作用域各自漂移。
  *
- * 全局根刻意做成可配置（{@link resolveGlobalRoot}）：`$DSH_HOME/{persona,mood,
+ * 全局根刻意做成可配置（{@link resolveGlobalRoot}）：`$DSH_HOME/{persona,
  * memory,rules}` 现在是空的、没有其它机制占用，但记忆这一格未来被 DSH 官方或别的
  * 插件征用并非不可能。一旦冲突，换 `globalRoot` 即可整体搬家，无需改代码。
  *
@@ -18,7 +18,6 @@ import { isAbsolute, join, relative, resolve } from 'node:path'
 import {
   DEFAULT_DIR,
   MEMORY_SUBDIR,
-  MOOD_SUBDIR,
   PERSONA_SUBDIR,
   RULES_SUBDIR,
 } from './layout.js'
@@ -26,8 +25,8 @@ import {
 /** 一份内容所处的作用域。 */
 export type LayerScope = 'global' | 'workspace'
 
-/** 全部受作用域管辖的层，顺序即注入顺序（persona → mood → rules → memory）。 */
-export const LAYERS = ['persona', 'mood', 'rules', 'memory'] as const
+/** 全部受作用域管辖的层，顺序即注入顺序（persona → rules → memory）。 */
+export const LAYERS = ['persona', 'rules', 'memory'] as const
 
 /** 层名。 */
 export type LayerName = (typeof LAYERS)[number]
@@ -38,7 +37,6 @@ export const SCOPE_LABEL: Readonly<Record<LayerScope, string>> = { global: '全�
 /** 层的中文标签。 */
 export const LAYER_LABEL: Readonly<Record<LayerName, string>> = {
   persona: '人格',
-  mood: '情绪',
   rules: '规则',
   memory: '记忆',
 }
@@ -46,7 +44,6 @@ export const LAYER_LABEL: Readonly<Record<LayerName, string>> = {
 /** 每一层在作用域根目录下的子目录名。 */
 const LAYER_SUBDIR: Readonly<Record<LayerName, string>> = {
   persona: PERSONA_SUBDIR,
-  mood: MOOD_SUBDIR,
   rules: RULES_SUBDIR,
   memory: MEMORY_SUBDIR,
 }

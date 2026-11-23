@@ -144,23 +144,8 @@ const section = (sections: readonly Section[] & { readonly agent?: FakeAgent }, 
   sections.find((entry) => entry.name === name)?.text({ agent: sections.agent ?? AGENT }) ?? ''
 
 describe('row wiring', () => {
-  it('registers the seven prompt sections in persona → mood → rules → memory order', () => {
-    const { sections } = harness()
-    expect(sections.map((s) => s.name)).toEqual([
-      'workspace-persona',
-      'workspace-mood',
-      'workspace-mood-maintenance',
-      'global-rules',
-      'workspace-rules',
-      'global-memory',
-      'workspace-memory',
-    ])
-    expect(sections.map((s) => s.order)).toEqual([50, 52, 53, 54, 55, 58, 60])
-    const orders = sections.map((s) => s.order)
-    expect([...orders].sort((left, right) => left - right)).toEqual(orders)
-  })
 
-  it('registers the fourteen tools it documents', () => {
+  it('registers the twelve tools it documents', () => {
     expect(harness().tools.map((tool) => tool.name)).toEqual([
       'memory_status',
       'memory_read',
@@ -174,22 +159,10 @@ describe('row wiring', () => {
       'self_status',
       'persona_read',
       'persona_write',
-      'mood_get',
-      'mood_set',
     ])
   })
 
-  it('renders the mood-maintenance section by default', () => {
-    // moodProactive and the mood layer both default on, and an unprobed store is
-    // not a missing one, so the unconditional body renders on the first turn.
-    expect(section(harness().sections, 'workspace-mood-maintenance')).toContain('## 情绪维护')
-  })
 
-  it('renders no mood section at all when moodProactive is off', () => {
-    const { sections } = harness(WORKSPACE, { config: { moodProactive: false } })
-    expect(section(sections, 'workspace-mood')).toBe('')
-    expect(section(sections, 'workspace-mood-maintenance')).toBe('')
-  })
 
   it('renders the memory section from the fixture index', async () => {
     const { sections } = harness()
@@ -368,16 +341,6 @@ describe('project-level layer switches', () => {
     expect(refused.error).toContain('.dsh/workspace.yml')
   })
 
-  it('turns the mood layer off: both mood sections render nothing', async () => {
-    const harnessed = harness(workspace)
-    await configure('workspace-conventions:\n  mood: false\n')
-    await configured(harnessed, 'rule_status')
-
-    // The workspace switch, not the row config, must zero the maintenance
-    // section too: a disabled layer costs 0 tokens on every turn.
-    expect(section(harnessed.sections, 'workspace-mood')).toBe('')
-    expect(section(harnessed.sections, 'workspace-mood-maintenance')).toBe('')
-  })
 
   it('keeps every layer on when the file has no section for this plugin', async () => {
     const harnessed = harness(workspace)
@@ -385,15 +348,14 @@ describe('project-level layer switches', () => {
     await configured(harnessed, 'rule_status')
 
     const status = await harnessed.tools.find((tool) => tool.name === 'rule_status')?.execute({}) as {
-      config: { layers: { memory: string, rules: boolean, skills: boolean, persona: boolean, mood: boolean, inherit: Record<string, boolean>, memoryLayout: string } }
+      config: { layers: { memory: string, rules: boolean, skills: boolean, persona: boolean, inherit: Record<string, boolean>, memoryLayout: string } }
     }
     expect(status.config.layers).toEqual({
       memory: 'enabled',
       rules: true,
       skills: true,
       persona: true,
-      mood: true,
-      inherit: { persona: true, mood: true, memory: true, rules: true },
+      inherit: { persona: true, memory: true, rules: true },
       memoryLayout: 'auto',
     })
   })
@@ -467,7 +429,6 @@ describe('the global scope and the self layers', () => {
     globalRoot = join(base, 'home')
     await mkdir(join(workspace, '.dsh'), { recursive: true })
     await mkdir(join(globalRoot, 'persona'), { recursive: true })
-    await mkdir(join(globalRoot, 'mood'), { recursive: true })
     await mkdir(join(globalRoot, 'memory'), { recursive: true })
     await mkdir(join(globalRoot, 'rules'), { recursive: true })
   })
@@ -514,26 +475,6 @@ describe('the global scope and the self layers', () => {
     expect(section(harnessed.sections, 'workspace-persona')).toBe('')
   })
 
-  it('writes and reads a workspace mood, and reports the decayed view', async () => {
-    const harnessed = harness(workspace, { globalRoot })
-    const set = harnessed.tools.find((tool) => tool.name === 'mood_set')
-    const written = await set?.execute({ label: '专注', valence: 0.4, arousal: 0.3, note: '收尾中' }) as { ok: boolean }
-    expect(written.ok).toBe(true)
-
-    const text = await settled(
-      () => section(harnessed.sections, 'workspace-mood'),
-      (value) => value.includes('专注'),
-    )
-    expect(text).toContain('## 情绪')
-    expect(text).toContain('专注')
-
-    const get = harnessed.tools.find((tool) => tool.name === 'mood_get')
-    const view = await get?.execute({}) as { ok: boolean, workspace: { present: boolean, label: string, weight: number } }
-    expect(view.ok).toBe(true)
-    expect(view.workspace.present).toBe(true)
-    expect(view.workspace.label).toBe('专注')
-    expect(view.workspace.weight).toBeGreaterThan(0.9)
-  })
 
   it('injects the global memory index and blocks it under inherit.memory: false', async () => {
     await put(join(globalRoot, 'memory', 'MEMORY.md'), '# 全局\n\n## 硬约束\n\n- 跨工作区约定：所有项目用中文回复。\n')

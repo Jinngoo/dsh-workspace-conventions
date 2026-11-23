@@ -17,7 +17,6 @@ describe('layer directories', () => {
     const workspace = join('C:', 'work', 'project')
 
     expect(workspaceLayerDir(workspace, 'persona')).toBe(join(workspace, DEFAULT_DIR, 'persona'))
-    expect(workspaceLayerDir(workspace, 'mood')).toBe(join(workspace, DEFAULT_DIR, 'mood'))
     expect(workspaceLayerDir(workspace, 'rules')).toBe(join(workspace, DEFAULT_DIR, 'rules'))
     expect(workspaceLayerDir(workspace, 'memory')).toBe(join(workspace, DEFAULT_DIR, 'memory'))
   })

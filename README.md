@@ -1,13 +1,12 @@
 # dsh-workspace-conventions
 
-> 给 agent 提供**双层作用域**（工作区 + 全局）的**人格、情绪、记忆、规则与技能**，并自动兼容已有的 WorkBuddy（`.workbuddy/`）体系。
+> 给 agent 提供**双层作用域**（工作区 + 全局）的**人格、记忆、规则与技能**，并自动兼容已有的 WorkBuddy（`.workbuddy/`）体系。
 >
 > DSH Bundle 插件，独立于 deepseek-harness 源码树。
 
 | 层 | 工作区来源 | 全局来源（跨工作区） | 抵达模型的方式 |
 |---|---|---|---|
 | 人格 persona | `.dsh/persona/*.md` | `$DSH_HOME/persona/*.md` | prompt 段落 + 2 个工具 |
-| 情绪 mood | `.dsh/mood/current.md` | `$DSH_HOME/mood/current.md` | prompt 段落（衰减；`moodProactive` 时另注入情绪维护）+ 2 个工具 |
 | 记忆 memory | `.workbuddy/memory/` 或 `.dsh/memory/` | `$DSH_HOME/memory/` | prompt 段落（两段）+ 7 个工具 |
 | 规则 rules | `.workbuddy/rules/*.md` | `$DSH_HOME/rules/*.md` | prompt 段落（两段）+ 2 个工具 |
 | 技能 skills | `.workbuddy/skills/` | 由 DSH 原生 `$DSH_HOME/skills` 提供（本插件不接管） | 注册进 `ctx.skills` 的原生 provider |
@@ -18,13 +17,11 @@
 workspace-conventions:
   memory: enabled       # enabled（默认）| read-only | disabled
   persona: true         # 默认 true：是否注入人格片段
-  mood: true            # 默认 true：是否注入情绪状态
   rules: true           # 默认 true
   skills: true          # 默认 true
   memoryLayout: auto    # auto（默认）| flat | host
   inherit:              # 默认全 true；false = 屏蔽全局，只看本工作区
     persona: true
-    mood: true
     memory: true
     rules: true
 ```
@@ -34,8 +31,8 @@ workspace-conventions:
 
 | | |
 |---|---|
-| **是什么** | [为什么需要它](#为什么需要它) · [人格](#人格persona) · [情绪](#情绪mood) · [记忆](#记忆) · [规则](#规则) · [技能](#技能) · [全局作用域](#全局作用域dsh_home) |
-| **怎么用** | [项目级开关](#项目级开关dshworkspaceyml) · [行配置（profile）](#行配置profile预算与情绪维护) · [开关 × 目录](#开关--目录一张对照表) · [状态矩阵](#各层的状态矩阵) · [安装](#安装作为-bundle-装进某个-profile) |
+| **是什么** | [为什么需要它](#为什么需要它) · [人格](#人格persona) · [记忆](#记忆) · [规则](#规则) · [技能](#技能) · [全局作用域](#全局作用域dsh_home) |
+| **怎么用** | [项目级开关](#项目级开关dshworkspaceyml) · [行配置（profile）](#行配置profile预算) · [开关 × 目录](#开关--目录一张对照表) · [状态矩阵](#各层的状态矩阵) · [安装](#安装作为-bundle-装进某个-profile) |
 | **怎么验证** | [对真实项目](#对着真实项目验证) · [校验覆盖命中](#校验-profile-覆盖真的命中了) · [实测归档](docs/verification/) |
 | **怎么开发** | [构建与测试](#构建与测试) · [目录结构](#目录结构) · [开发循环](#开发循环) · [升级注意](#升级注意) · [已知限制](#已知限制当前版本) |
 | **背景细节** | [设计文档](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)） · [双层作用域设计](docs/DESIGN-self-scopes.zh.md) · [配置格式规格](docs/workspace-config.md) · [历史留档](docs/legacy-preset/) |
@@ -50,7 +47,7 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 - **DSH 的技能根是固定的。** `@deepseek-ai/dsh-skill-filesystem` 只扫描 `<projectRoot>/.dsh/skills`、`<projectRoot>/.agents/skills`、`customSkillDirs`、`<dshHome>/skills`、`<agentsHome>/skills`，`.workbuddy/skills/` 不在其中。
 - **DSH 没有跨工作区记忆，也没有 soul/persona 的持久机制。** 它的全局注入只有 `$DSH_HOME/AGENTS.md` 这一份静态文本；人格由 preset 的 `personaPrefix` 承载，且会话首轮后锁定。凡是"可写、可检索、会演化"的东西都留给插件——本插件就补这一块。
 
-于是把带 `.workbuddy/` 的既有项目当工作区打开时，只有 `AGENTS.md` 会被加载，规则与技能完全不可见；而跨项目的偏好、人格与情绪无处安放。本插件同时补这两个缺口。
+于是把带 `.workbuddy/` 的既有项目当工作区打开时，只有 `AGENTS.md` 会被加载，规则与技能完全不可见；而跨项目的偏好与人格无处安放。本插件同时补这两个缺口。
 
 ## 记忆
 
@@ -76,7 +73,7 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 
 - **能不能写由文件沙箱策略决定**：`$DSH_HOME` 在工作区之外，「工作区内修改」下写不进去。要让写入生效，调用带 `sandbox_permissions: "danger-full-access"` + `justification`，走 DSH 的 **sandbox escalation（按次升级）**：弹一次审批，批准后**仅这一次**放宽到完全权限，会话权限模式不变。
 - **拒绝即失败**：拒绝、取消、无应答方都是确定性拒绝，工具体不会执行，什么都不会写；插件不额外插入自己的同意闸门（0.8.0 起移除）。
-- **不受影响**：工作区作用域的写入、`mood_set`、全部读取工具；被项目开关挡住时（`memory` 为 `read-only`/`disabled`、`inherit.memory: false`）工具自己的拒绝就是答案。
+- **不受影响**：工作区作用域的写入、全部读取工具；被项目开关挡住时（`memory` 为 `read-only`/`disabled`、`inherit.memory: false`）工具自己的拒绝就是答案。
 
 ## 人格（persona）
 
@@ -93,45 +90,15 @@ DSH 自身不认识 `.workbuddy/`，也没有任何"记忆"或"人格"机制：
 - 项目事实写进记忆，不写进人格——两者混淆是这套系统最常见的腐化方式。
 - 全局人格写入同样受沙箱策略约束：需要时按次升级（见上文「写入与按次升级」）。
 
-## 情绪（mood）
-
-一个**有时效**的小状态，不是记忆：它只回答"此刻是什么状态"，并随时间衰减。
-
-```markdown
----
-label: 专注
-valence: 0.4        # -1 消极 … +1 积极
-arousal: 0.3        # 0 平静 … 1 亢奋
-updated: 2026-10-23T00:12:00+08:00
----
-正在收尾一个插件设计，节奏紧凑但不急躁。
-```
-
-- 文件：`.dsh/mood/current.md`（工作区）与 `$DSH_HOME/mood/current.md`（全局）。
-- 渲染时按 `weight = 0.5 ** (age / halfLifeHours)` 衰减（`moodHalfLifeHours` 默认 6）；超过 `moodMaxAgeHours`（默认 48）或权重低于 0.05 → 视为**已平复**，只注入一行 `当前情绪：已平复`。
-- 两份状态**取最新一份**，不混合打分（混合会凭空造出没人写过的状态）。
-- 工具：`mood_set`（写状态，自动记 `updated`）、`mood_get`（原始状态 + 衰减后视图）、`self_status`。
-- 不写历史流水；需要留档的结论请用 `memory_write`。
-
-### 情绪维护
-
-情绪层默认还会注入一小段 `## 情绪维护`（order 53，prompt 段落 `workspace-mood-maintenance`）：它请模型在**明确的状态变化**时顺手调用 `mood_set`——任务阶段切换、被纠正、卡住之后的突破、长任务收尾——同时写明"不要每轮都写一次""情绪不是记忆"。
-
-- **显示条件**：工作区 `mood` 层开着（默认开），且行配置 `moodProactive` 为 `true`（默认）。任一为假 → 段落为空串、**零 token**。
-- 存储里还没有情绪记录时（已探测且为空），多一行邀请"第一次写入"的条件提示；写过一次后它自己消失。
-- 衰减、半衰期与"取最新一份"的逻辑**完全没变**；这段文字只在"第一次写入"前后各有一个稳定形态，不随情绪强度变化。
-- 它只能**鼓励**，不能强制：prompt 段落没有"必须调用工具"的表达力，真正的自动维护需要另一个常驻循环插件。项目级无法只关这段而保留情绪层，见[已知限制](#已知限制当前版本)。
-
 ## 全局作用域（`$DSH_HOME`）
 
 | 层 | 全局目录 | 工作区同名遮蔽 |
 |---|---|---|
 | 人格 | `$DSH_HOME/persona/*.md` | ✅ 按片段名 |
-| 情绪 | `$DSH_HOME/mood/current.md` | ✅ 取最新一份（不是遮蔽） |
 | 记忆 | `$DSH_HOME/memory/MEMORY.md`（单文件长期画像：章节 + 条目） | ❌ 两段独立注入 |
 | 规则 | `$DSH_HOME/rules/*.md`（`alwaysApply` / `paths` 同语义） | ✅ 按文件名 |
 
-- 全局根默认就是 `$DSH_HOME`（`~/.dsh`），可用行配置 `globalRoot` 整体搬家——`$DSH_HOME/{persona,mood,memory,rules}` 目前没有其它机制占用，但记忆/人格这类名字未来被 DSH 或别的插件征用并非不可能，这个配置就是为此留的逃生门。
+- 全局根默认就是 `$DSH_HOME`（`~/.dsh`），可用行配置 `globalRoot` 整体搬家——`$DSH_HOME/{persona,memory,rules}` 目前没有其它机制占用，但记忆/人格这类名字未来被 DSH 或别的插件征用并非不可能，这个配置就是为此留的逃生门。
 - 全局写入落在工作区之外：`workspace-write` 策略会拒绝。工具会先预检并在不可写时返回可读原因；要让写入真正生效，调用需带 `sandbox_permissions: "danger-full-access"` + `justification` 走**按次升级**（仅该次调用放宽，会话权限模式不变），或在 `danger-full-access` 会话里直接写。
 - 0.8.0 起插件不再请求写入同意：全局写入只受沙箱策略与准入/预算约束；需要写 `$DSH_HOME` 时用按次升级（见上文「写入与按次升级」）。
 - 全局记忆的准入比工作区更严：只接受 `preference` / `constraint` / `convention` / `decision` 四类，项目一次性发现留在工作区。
@@ -169,7 +136,6 @@ tsconfig.json         # 独立严格配置（对齐 harness 的 tsconfig.base.js
 src/index.ts          # 装配层：配置、14 个工具、7 个 prompt 段落、技能 provider、触碰追踪
 src/scope.ts          # 双层作用域：全局根解析、各层目录、路径包含判断
 src/persona.ts        # 人格片段（纯逻辑）：解析、排序、遮蔽合并、预算渲染
-src/mood.ts           # 情绪状态（纯逻辑）：解析/生成、半衰期衰减、确定性渲染、「情绪维护」段落文本
 src/memory.ts         # 记忆模型（纯逻辑）：准入、条目渲染、索引编辑、流水盘点
 src/rules.ts          # 规则册解析、分类、触发判定、段落渲染与预算
 src/skills.ts         # 技能包解析与 ctx.skills provider 工厂
@@ -184,7 +150,7 @@ scripts/verify-workbuddy.mjs  # 对着一个真实 WorkBuddy 项目跑一遍装�
 tests/                # vitest 单测（含对真实 apply() 装配的端到端用例，以及对本仓库自身 patch 文件的断言）
 docs/DESIGN.md        # 设计文档（英文）
 docs/DESIGN.zh.md     # 设计文档中文版
-docs/DESIGN-self-scopes.zh.md  # 双层作用域与 persona/mood 的设计（含全局根命名冲突评估）
+docs/DESIGN-self-scopes.zh.md  # 双层作用域与 persona 的设计（含全局根命名冲突评估）
 docs/workspace-config.md  # 项目级配置文件的格式规格（含供其他插件复用的约定）
 docs/verification/    # 实测证据归档（正向 / 降级 / 反向三组，含一个已修复缺陷的记录）
 docs/legacy-preset/   # 历史留档：0.1.7 起被废弃的 $DSH_HOME/.agent-presets/memory/ 目录（其中保留旧包名属历史准确性）
@@ -202,13 +168,11 @@ workspace-conventions:
   rules: true           # 默认 true
   skills: true          # 默认 true
   persona: true         # 默认 true
-  mood: true            # 默认 true
   memoryLayout: auto    # auto（默认）| flat | host — 新流水写到哪里
 
   # 第二轴：是否继承全局作用域（默认全 true；false = 屏蔽全局，只看本工作区）
   inherit:
     persona: true
-    mood: true
     memory: true
     rules: true
 ```
@@ -219,26 +183,12 @@ workspace-conventions:
 
 - `memory: read-only` 不注入记忆段落、拒绝写入与提升，但读工具照常，只读不等于失明。
 - `inherit.memory: false` 会让 `global-memory` 段落消失，并**连工具都拒绝** `scope="global"`——屏蔽要是能绕过的，就等于没屏蔽。
-- `inherit.persona/mood/rules: false` 屏蔽该层的**全局来源**：注入与对全局的读写工具一起失效（全局写入会被拒），工作区自己的层照常。
+- `inherit.persona/rules: false` 屏蔽该层的**全局来源**：注入与对全局的读写工具一起失效（全局写入会被拒），工作区自己的层照常。
 - 未知键（包括 `inherit` 里拼错层名）或类型不对会**报错并停用所有层**：只报错却照跑默认值，等于让那个开关静默失效。
-- `memoryLayout` 默认 `auto`：沿用目录里已有的布局（全新目录即平铺在 `memory/` 下）；它只决定**新流水写到哪里**，不搬动也不隐藏已有流水。只有 memory 有布局键——persona / mood / rules 没有，理由见 [DESIGN.zh.md](docs/DESIGN.zh.md) 的「为什么只有 memory 有布局」小节。
+- `memoryLayout` 默认 `auto`：沿用目录里已有的布局（全新目录即平铺在 `memory/` 下）；它只决定**新流水写到哪里**，不搬动也不隐藏已有流水。只有 memory 有布局键。
 - 格式、错误语义、自动创建与重载规则、以及**供其他插件复用的约定**见 [docs/workspace-config.md](docs/workspace-config.md)。
 
 `pnpm verify:workbuddy <工作区>` 会在报告开头列出该工作区生效的层开关，因此它不会对着一份已被关掉的工作区报告其实看不到的贡献。它是只读检查，不会替你创建配置文件（要验证创建路径本身时加 `--seed`）。
-
-### 行配置（profile）：预算与情绪维护
-
-这些键是**行配置**（profile 组合里 `workspace-conventions` 那一行的 `config:`），**不是这份项目文件里的键**：
-
-| 键 | 默认 | 作用 |
-|---|---|---|
-| `moodProactive` | `true` | 是否注入「情绪维护」段落（还要求本文件的 `mood` 为真） |
-| `globalMemoryBytes` | `4096` | 全局长期画像 `MEMORY.md` 的**存储硬预算**（0.7.0 新增）；超出的写入/重写被拒绝并提示先精简 |
-| `globalIndexPromptBytes` | `4096` | 全局画像的**注入上限**；超出时截断并提示用 `memory_read` 读全文 |
-
-边界是刻意的：行配置随 profile 生效、对该 profile 的所有工作区一致，属于**部署策略**；`.dsh/workspace.yml` 只说"这个项目里层开不开、是否继承全局"（`layers.*` / `inherit.*`）。把这些键写进 `.dsh/workspace.yml` 会命中**未知键**错误——报错并停用所有层。
-
-于是项目级能控制的只有 `mood` / `inherit.mood`：要关掉情绪维护只能整体关情绪层；想保留情绪层、只关主动提醒，只能改 profile 的行配置（对所有工作区生效）。
 
 ### 开关 × 目录：一张对照表
 
@@ -249,12 +199,10 @@ workspace-conventions:
 | `.workbuddy/memory/` | 本插件（工作区记忆后端①） | `memory` | — |
 | `.dsh/memory/` | 本插件（工作区记忆后端②） | `memory` | — |
 | `.dsh/persona/` | 本插件（工作区人格） | `persona` | — |
-| `.dsh/mood/` | 本插件（工作区情绪） | `mood` | — |
 | `.workbuddy/rules/` | 本插件（工作区规则唯一来源） | `rules` | — |
 | `.workbuddy/skills/` | 本插件 → 原生技能目录 | `skills` | — |
 | `$DSH_HOME/memory/MEMORY.md` | 本插件（全局记忆：单文件长期画像） | `memory` | `memory` |
 | `$DSH_HOME/persona/` | 本插件（全局人格） | `persona` | `persona` |
-| `$DSH_HOME/mood/` | 本插件（全局情绪） | `mood` | `mood` |
 | `$DSH_HOME/rules/` | 本插件（全局规则） | `rules` | `rules` |
 | `$DSH_HOME/skills/` | **DSH 原生** | ❌ 不受本插件影响，恒生效 | — |
 | `.dsh/skills/` | **DSH 原生**（rank 100） | ❌ 不受影响，恒生效 | — |
@@ -281,9 +229,6 @@ workspace-conventions:
 | `persona` 缺省 | 注入 `## 人格`（全局 + 工作区，同名遮蔽） | `persona_read` / `persona_write` 可用 | 多片段合并 |
 | `persona: false` | 不注入 | 两个工具被拒 | 不读不写 |
 | `inherit.persona: false` | 只注入工作区片段 | 可写全局人格被拒 | 屏蔽全局人格 |
-| `mood` 缺省 | 注入 `## 情绪`（衰减后，过期显示已平复） | `mood_get` / `mood_set` 可用 | 取最新一份 |
-| `mood: false` | 不注入 | 两个工具被拒 | 不读不写 |
-| `inherit.mood: false` | 只看工作区状态 | 写全局情绪被拒 | 屏蔽全局情绪 |
 | `rules` 缺省 | 注入工作区常驻册 + 全局常驻册，条件册按触发 | `rule_read` / `rule_status` 可用 | 两套预算独立 |
 | `rules: false` | 不注入 | 两者都被拒 | 不读，也不再记录触发 |
 | `inherit.rules: false` | 只注入工作区常驻册 | `rule_read(scope=global)` 被拒 | 屏蔽全局规则 |
@@ -296,7 +241,7 @@ workspace-conventions:
 - **只读时不注入记忆段落**：该段落承载的就是索引正文。只读工作区仍可用 `memory_read` / `memory_search` 取到同样内容，每轮再注入一遍只是重复付费。
 - **屏蔽是彻底的**：`inherit.memory: false` 同时掐掉注入与工具的 `scope="global"` 路径。只掐一半会让开关变成装饰。
 - **诊断工具随层一起被拒**：`memory: read-only` / `disabled` 下 `memory_status` 也被拒；要查生效开关与配置错误，用恒可用的 `rule_status`（带 `config` 字段）、`self_status`（带全部层与继承状态），或看 `pnpm verify:workbuddy` 报告的开头。
-- **本插件不提供 GUI**：配置来源只有两处—层的开关与继承在项目级 `.dsh/workspace.yml`（唯一来源），字节预算、全局根、以及 0.6.0 的审批/情绪维护开关在 profile 的 `cordis.patch.yml`（面向整个 profile 的策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
+- **本插件不提供 GUI**：配置来源只有两处—层的开关与继承在项目级 `.dsh/workspace.yml`（唯一来源），字节预算、全局根、以及 0.6.0 的审批开关在 profile 的 `cordis.patch.yml`（面向整个 profile 的策略）。DSH 的 Client 侧没有通用文件写入服务，浏览器页面无法写项目文件，因此没有"在插件页里改项目开关"这条路。
 
 ### 记忆后端的选取与开关无关
 
@@ -398,17 +343,14 @@ dsh plugin --profile <profile> add <本仓库所在目录的绝对路径>
 
 - **全局写入受沙箱策略约束**：`$DSH_HOME` 在工作区之外，`workspace-write` 下写入被拒。工具会先预检并给出可读原因；带 `sandbox_permissions: "danger-full-access"` + `justification` 可走**按次升级**（仅该次调用放宽），或在 `danger-full-access` 会话里直接写。
 - **插件不做写入同意闸门**：0.8.0 起不再在 `tools/pre-execute` 里请求同意；能否写只由沙箱策略决定，同意只发生在按次升级时（由 DSH 的 escalation 通道询问）。通用 `write` / `edit` 与插件工具在这件事上没有差别。
-- **`moodProactive` 是行配置**：单个项目无法只关「情绪维护」而保留情绪层——`.dsh/workspace.yml` 里只有 `mood` / `inherit.mood`；按项目控制只能整体关 `mood`。
-- **情绪维护只是鼓励**：prompt 段落表达不了"必须调用工具"，也没有每轮自动写入；真自动化需要一个常驻循环（daemon-loop）插件，本行不做。
-- **全局层在本进程内缓存**：外部直接改 `$DSH_HOME/{persona,mood,memory,rules}` 不会实时生效，要等下一个新会话（`agent/created` 会重读）、经工具的一次写入，或重启进程。
+- **全局层在本进程内缓存**：外部直接改 `$DSH_HOME/{persona,memory,rules}` 不会实时生效，要等下一个新会话（`agent/created` 会重读）、经工具的一次写入，或重启进程。
 - 写入是整文件读—改—写，**无锁**；同一工作区并发写可能丢一次写入（全局层同此，且跨工作区共享，风险更高）。
 - 工作区缓存冷启动会先渲染**一轮预热提示**（因为 prompt provider 契约要求同步返回）；规则段落在冷却时渲染空串而非提示。
 - 索引注入有 7000 字节上限（`indexPromptBytes`）；全局章节是单文件画像，存储预算是 `globalMemoryBytes`（默认 4 KB），注入上限是 `globalIndexPromptBytes`（默认 4 KB），超出部分需用 `memory_read` 读。
-- 人格/情绪/规则都**没有 watcher**：外部编辑在下一个新会话或下一次工具写入时才被看到。
-- 情绪的衰减在**渲染时**计算，不落盘；`current.md` 只有一个当前状态，不保留历史。
+- 人格/规则都**没有 watcher**：外部编辑在下一个新会话或下一次工具写入时才被看到。
 - 后端按目录**存在性**选择：中途创建 `.workbuddy/memory` 会切后端，已写入 `.dsh/memory` 的记忆**不会迁移**。
 - 流水布局按**目录形状**探测：出现装着日期文件的计算机名子目录即切到「按本机目录读写」，子目录清空后回落平铺。计算机名取 `hostname` 输出；已有目录按「精确同名优先、其次忽略大小写」复用，因此同一台机器不同大小写的目录名不会被当成两台。
-- 工作区记忆只能新增，**没有删除/过期**工具（情绪可覆盖）；全局画像可用 `memory_revise` 整篇删除、合并、改写，或直接编辑 `MEMORY.md`。
+- 工作区记忆只能新增，**没有删除/过期**工具；全局画像可用 `memory_revise` 整篇删除、合并、改写，或直接编辑 `MEMORY.md`。
 - 规则**只认 DSH 的结构化文件工具**（`read` / `write` / `edit` 的 `file_path`）；shell 改文件不触发条件册。
 - 规则触发状态**在进程内累积、不落盘**；会话中途改 rules 文件不重载。
 - 技能**没有 watcher**，且只认**一层深度**（`<name>/SKILL.md`、`<name>.md`）。
@@ -417,6 +359,14 @@ dsh plugin --profile <profile> add <本仓库所在目录的绝对路径>
 设计细节与逐层取舍见 [docs/DESIGN.zh.md](docs/DESIGN.zh.md)（[English](docs/DESIGN.md)）。
 
 ## 变更记录
+
+### 0.9.0 — 移除情绪（mood）层
+
+- **删除整层**：`src/mood.ts`、`workspace-mood` 与 `workspace-mood-maintenance` 两个 prompt 段落、`mood_get` / `mood_set` 两个工具、以及 `mood` / `inherit.mood` 两个开关。理由：实际用处不大，而它带来的衰减计算、每轮注入与一套独立文件格式都是持续的复杂度。
+- **行配置去掉四个键**：`moodPromptBytes` / `moodHalfLifeHours` / `moodMaxAgeHours` / `moodProactive`。旧 profile 里若仍写着它们，schema 会忽略（不再是已知键）。
+- **`self_status` 由四层变三层**：persona / rules / memory；mood 段消失。
+- **不迁移旧文件**：`.dsh/mood/current.md` 与 `$DSH_HOME/mood/current.md` 留在原地但不再被读取，需要时手动删。
+- 工具数 13 → 11，prompt 段落 6 → 4，测试 227 项全绿。
 
 ### 0.8.0 — 移除写入同意闸门
 
@@ -429,37 +379,34 @@ dsh plugin --profile <profile> add <本仓库所在目录的绝对路径>
 - **全局记忆模型重做**：`$DSH_HOME/memory/` 从「索引 + 日期流水」改为**单文件长期画像** `MEMORY.md`（`## 章节` + `- [kind] 条目`），每轮整篇注入，不再按天分册、不再靠追加膨胀。旧日期流水不再读取（升级说明见「记忆」章节）。
 - **新增 `memory_revise` 工具**（scope 仅 global）：整篇重写——先读、把新事实融合进已有条目、删掉过时或重复内容、再提交全文；逐条准入审查 + 字节预算校验。工具数 13 → 14。
 - **新增行配置 `globalMemoryBytes`**（默认 4096）：全局画像的存储硬预算；`globalIndexPromptBytes` 默认从 3 KB 提到 4 KB 作为注入上限。
-- **审批与授权分离**：`memory_write` / `memory_promote` / `memory_revise` / `persona_write` / `mood_set` 增加可选的 `sandbox_permissions` + `justification`，经 DSH 的 `approveEscalation` 走**按次升级**：批准后仅该次调用放宽到 `danger-full-access`，会话权限模式不变；带升级参数时同意闸门不再重复询问（合并为一次弹窗）。
+- **审批与授权分离**：`memory_write` / `memory_promote` / `memory_revise` / `persona_write` 增加可选的 `sandbox_permissions` + `justification`，经 DSH 的 `approveEscalation` 走**按次升级**：批准后仅该次调用放宽到 `danger-full-access`，会话权限模式不变；带升级参数时同意闸门不再重复询问（合并为一次弹窗）。
 - **开关改名（0.7.0 历史，0.8.0 已移除）**：`approveGlobalMemory` → `requestGlobalMemoryApproval`，`approvePersonaWrite` → `requestPersonaWriteApproval`；0.8.0 起这两个键整体删除。
 - **写入可行性预检**：全局写入前先判断当前策略能否写目标路径，不可写时直接返回可读原因与升级指引，不再出现"先同意、再失败"。
 - **迁移**：把旧 `memory/YYYY-MM-DD.md` 手工并入 `MEMORY.md` 后移入 `archive/`；外部编辑仍要等新会话或一次工具写入后才被看到。
 - 测试：311 个用例（新增 global-memory 17 个、approval escalation 相关用例），`pnpm typecheck` / `pnpm test` 全绿。
 
-### 0.6.0 — 写入审批与情绪维护
+### 0.6.0 — 写入审批
 
-- **写入审批**：`memory_write` / `memory_promote` 的 `scope="global"`、以及 `persona_write`（工作区与全局两个作用域）在工具体执行前，经 DSH approval seam 请求**一次性**同意（`tools/pre-execute` → `{kind:'ask'}`，只接受 `allowed-once`）。拒绝/取消/无应答方 = DSH 拒绝调用、工具体从未执行；会话策略 `never` 确定性拒绝。工作区记忆写入、`mood_set`、全部读取不受影响。没有"总是允许"。
-- **三个行配置**：`requestGlobalMemoryApproval` / `requestPersonaWriteApproval` / `moodProactive`，全部布尔、默认 `true`。属于 profile 的行配置，**不能**写进 `.dsh/workspace.yml`；项目级开关仍是 `layers.*` / `inherit.*`。
-- **情绪维护段落**：新增同步 provider `workspace-mood-maintenance`（order 53），在情绪层开着且 `moodProactive` 为真时注入 `## 情绪维护`，鼓励在明确状态变化时顺手 `mood_set`（阶段切换、被纠正、卡住后突破、长任务收尾），并说明不要每轮写、情绪不是记忆；没有情绪记录时多一行第一次写入的邀请，有状态后消失。任一开关关闭 = 0 token，衰减逻辑不变。
-- **明确留给 phase 2**：通用 `write` / `edit` 仍可绕过审批直接改人格/情绪文件；本版只门本插件自己的工具。
+- **写入审批**：`memory_write` / `memory_promote` 的 `scope="global"`、以及 `persona_write`（工作区与全局两个作用域）在工具体执行前，经 DSH approval seam 请求**一次性**同意（`tools/pre-execute` → `{kind:'ask'}`，只接受 `allowed-once`）。拒绝/取消/无应答方 = DSH 拒绝调用、工具体从未执行；会话策略 `never` 确定性拒绝。工作区记忆写入、全部读取不受影响。没有"总是允许"。
+- **两个行配置**：`requestGlobalMemoryApproval` / `requestPersonaWriteApproval`，全部布尔、默认 `true`。属于 profile 的行配置，**不能**写进 `.dsh/workspace.yml`；项目级开关仍是 `layers.*` / `inherit.*`。
+- **明确留给 phase 2**：通用 `write` / `edit` 仍可绕过审批直接改人格文件；本版只门本插件自己的工具。
 - prompt 段落 6 → 7 个；工具仍为 13 个。
 
 ### 0.5.1 — 缓存与上下文优化
 
-- **mood 注入文本改为缓存友好**：去掉精确强度（连续变化，会每几分钟改一次文本），年龄改为粗桶（`刚刚` / `约半小时前` / `约 N 小时前`）。同一份状态在 2 小时窗口内渲染出的不同文本从 **71 种降到 4 种**，runtime-context 快照的追加频率从「每分钟」降到「每小时」量级。精确 `weight` 仍可从 `mood_get` / `self_status` 取。
 - **工作区记忆段落瘦身**：去掉与工具 schema 重复的工具清单行，以及已被 runtime context 覆盖的工作区路径行（每次会话约省 140 字节；这是每会话固定的上下文）。
 - **工具描述精简**：`memory_write` / `memory_read` 去掉与 `memory_help`、`memory_status` 输出重复的布局说明，13 个工具 schema 从 5409 → 5293 字节。
 - 背景（实测于本会话日志）：插件内容作为 **user 角色 runtime-context 快照**追加在历史末尾，只在文本变化时追加（`runtime-context.ts` 的 `project()` 比对），因此不破坏前缀缓存；378 次请求的缓存命中率为 **97.1%**（111.5M 命中 / 3.3M 未缓存输入），重启后的首个 turn 掉到 76% 再回升。真正需要控制的是**变化频率**，而不是「每轮都发」——LLM API 无状态，完整上下文本来就每轮重发。
 
 ### 0.5.0 — 双层作用域与「自我层」
 
-- **新增全局作用域**：`$DSH_HOME/{persona,mood,memory,rules}`，与工作区 `<project>/.dsh/` 对称；全局根可用 `globalRoot` 覆盖（`$DSH_HOME` 下这些名字目前无人占用，但未来被其他机制征用时这是逃生门）。
+- **新增全局作用域**：`$DSH_HOME/{persona,memory,rules}`，与工作区 `<project>/.dsh/` 对称；全局根可用 `globalRoot` 覆盖（`$DSH_HOME` 下这些名字目前无人占用，但未来被其他机制征用时这是逃生门）。
 - **新增 persona（人格）层**：`.dsh/persona/*.md` + `$DSH_HOME/persona/*.md`，按片段合并、同名工作区遮蔽全局、独立预算（`personaPromptBytes` / `personaFileBytes`），段落 order 50；工具 `persona_read` / `persona_write`。
-- **新增 mood（情绪）层**：`.dsh/mood/current.md` + 全局同名文件，按半衰期衰减（`moodHalfLifeHours` 默认 6、`moodMaxAgeHours` 默认 48），过期渲染为「已平复」，段落 order 52；工具 `mood_get` / `mood_set`。
 - **记忆与规则接入全局**：全局记忆索引（order 58，独立预算 `globalIndexPromptBytes`）与全局规则段（order 54，独立预算 `globalRulesPromptBytes`）；`memory_*` 与 `rule_read` 增加 `scope` 参数，`memory_search` 默认 `both`；全局记忆写入只接受 `preference`/`constraint`/`convention`/`decision` 四类。
-- **workspace.yml 增加第二轴**：`persona` / `mood` 启用开关与嵌套 `inherit.{persona,mood,memory,rules}` 继承开关；未知键与 `inherit` 里拼错的层名仍按既有防御停用所有层。起手模板同步更新（仍全注释、仍惰性创建）。
-- **新增 `self_status` 工具**：一张全景表（两作用域 × 各层的目录/条目/字节/预算/继承/情绪衰减/阻塞原因），`memory_status` 增加 `global` 段并删除 `globalScope: 未实现` 占位。
+- **workspace.yml 增加第二轴**：`persona` 启用开关与嵌套 `inherit.{persona,memory,rules}` 继承开关；未知键与 `inherit` 里拼错的层名仍按既有防御停用所有层。起手模板同步更新（仍全注释、仍惰性创建）。
+- **新增 `self_status` 工具**：一张全景表（两作用域 × 各层的目录/条目/字节/预算/继承/阻塞原因），`memory_status` 增加 `global` 段并删除 `globalScope: 未实现` 占位。
 - **全局写入的错误可读**：写入 `$DSH_HOME` 被策略拒绝时返回原因与替代方案，而不是抛裸错。
-- 测试：239 → 258 个用例（persona 34、mood 47、scope 8、全局装配层 7、inherit 配置 5），`pnpm typecheck` 与 `pnpm test` 全绿；起手模板惰性由测试保证（全注释、可读回默认值）。
+- 测试：239 → 258 个用例（persona 34、scope 8、全局装配层 7、inherit 配置 5），`pnpm typecheck` 与 `pnpm test` 全绿；起手模板惰性由测试保证（全注释、可读回默认值）。
 - 修复：`ensureWorkspaceConfig` 现在在写入前**再检查一次**文件是否已存在，避免与刚创建该文件的进程/编辑器竞态而覆盖用户内容。
 
 ### 0.4.1 — 对齐 DSH 0.2.1-rc.2

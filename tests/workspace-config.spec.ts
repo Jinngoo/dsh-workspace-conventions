@@ -51,7 +51,7 @@ describe('the layer switches', () => {
     const config = await layersOf(['layers:', '  rules: false', '  skills: false'].join('\n'))
 
     expect(config.issues).toEqual([])
-    expect(config.layers).toEqual({ memory: 'enabled', rules: false, skills: false, persona: true, mood: true, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'enabled', rules: false, skills: false, persona: true, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 
   it('lets the plugin section win over the shared section', async () => {
@@ -109,7 +109,7 @@ describe('a typo is reported, never ignored', () => {
     expect(config.issues[0]?.message).toContain('unknown key')
     // A typo must not leave the intended switch silently inert, so the file is
     // treated as broken rather than as "the keys it did understand plus defaults".
-    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, mood: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 
   it('reports a non-boolean switch and stops every layer', async () => {
@@ -118,7 +118,7 @@ describe('a typo is reported, never ignored', () => {
     expect(config.issues).toHaveLength(1)
     expect(config.issues[0]?.message).toContain('rules')
     expect(config.issues[0]?.message).toContain('true or false')
-    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, mood: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 
   it('reports an unusable memory value with the accepted spellings', async () => {
@@ -159,7 +159,7 @@ describe('a broken file fails the layers closed', () => {
     expect(config.exists).toBe(true)
     expect(config.issues.length).toBeGreaterThan(0)
     expect(config.issues[0]?.message).toContain('not valid configuration')
-    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, mood: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 
   it('disables every layer when the file exists but cannot be read', async () => {
@@ -167,7 +167,7 @@ describe('a broken file fails the layers closed', () => {
 
     expect(config.exists).toBe(true)
     expect(config.issues[0]?.message).toContain('could not be read')
-    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, mood: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 
   it('names the offending line when the file is malformed YAML', async () => {
@@ -199,7 +199,7 @@ describe('the file is a reusable container', () => {
   it('keeps the memory layer out of defaults when only skills is configured', async () => {
     const config = await layersOf('workspace-conventions:\n  skills: false\n')
 
-    expect(config.layers).toEqual({ memory: 'enabled', rules: true, skills: false, persona: true, mood: true, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'enabled', rules: true, skills: false, persona: true, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 })
 
@@ -215,7 +215,7 @@ describe('the memory layout preference', () => {
 
     expect(config.issues).toHaveLength(1)
     expect(config.issues[0]?.message).toContain('auto')
-    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, mood: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
+    expect(config.layers).toEqual({ memory: 'disabled', rules: false, skills: false, persona: false, inherit: DEFAULT_INHERIT, memoryLayout: 'auto' })
   })
 })
 
@@ -290,19 +290,18 @@ describe('seeding a workspace that has no file', () => {
     // Nothing but comments, so creating the file can never change behaviour.
     expect(lines.every((line) => line.trimStart().startsWith('#'))).toBe(true)
     // Every switch the plugin understands is discoverable from the file itself.
-    for (const key of ['version', 'layers', 'memory', 'rules', 'skills', 'memoryLayout', 'persona', 'mood', 'inherit']) {
+    for (const key of ['version', 'layers', 'memory', 'rules', 'skills', 'memoryLayout', 'persona', 'inherit']) {
       expect(WORKSPACE_CONFIG_TEMPLATE).toContain(key)
     }
   })
 })
 
 describe('the second axis: inherit', () => {
-  it('turns persona and mood on by default and allows switching them off', async () => {
-    const config = await layersOf(['workspace-conventions:', '  persona: false', '  mood: false'].join('\n'))
+  it('turns persona on by default and allows switching it off', async () => {
+    const config = await layersOf(['workspace-conventions:', '  persona: false'].join('\n'))
 
     expect(config.issues).toEqual([])
     expect(config.layers.persona).toBe(false)
-    expect(config.layers.mood).toBe(false)
   })
 
   it('reads the nested inherit mapping over the defaults', async () => {
@@ -314,7 +313,7 @@ describe('the second axis: inherit', () => {
     ].join('\n'))
 
     expect(config.issues).toEqual([])
-    expect(config.layers.inherit).toEqual({ persona: false, mood: true, memory: false, rules: true })
+    expect(config.layers.inherit).toEqual({ persona: false, memory: false, rules: true })
     expect(config.layers.persona).toBe(true)
   })
 
@@ -328,11 +327,11 @@ describe('the second axis: inherit', () => {
   })
 
   it('reports a non-boolean inherit value and fails closed', async () => {
-    const config = await layersOf(['workspace-conventions:', '  inherit:', '    mood: sometimes'].join('\n'))
+    const config = await layersOf(['workspace-conventions:', '  inherit:', '    rules: sometimes'].join('\n'))
 
     expect(config.issues).toHaveLength(1)
     expect(config.issues[0]?.message).toContain('true or false')
-    expect(config.layers.mood).toBe(false)
+    expect(config.layers.rules).toBe(false)
   })
 
   it('accepts the shared layers section for the new axes too', async () => {
