@@ -7,3 +7,6 @@ lib/
 # the committed test fixture under tests/fixtures/ stays tracked.
 /.dsh/
 /.workbuddy/
+
+# 发布时临时写入 token 的文件，绝不能入库
+.npmrc
